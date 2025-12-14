@@ -1,0 +1,6 @@
+/target
+/Arachne/target
+/.idea
+.env
+Arachne/.env
+*.exe

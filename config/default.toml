@@ -10,28 +10,28 @@ uri = "127.0.0.1:9042"
 keyspace = "arachne"
 
 [worker]
-max_concurrent_requests = 1000
-request_timeout_secs = 30
-connect_timeout_secs = 10
+max_concurrent_requests = 10000
+request_timeout_secs = 15
+connect_timeout_secs = 5
 max_content_size_bytes = 5242880  # 5MB
-max_redirects = 10
+max_redirects = 5
 user_agent = "ArachneBot/2.0 (+https://github.com/Noel-Alex/Arachne)"
-retry_attempts = 3
-retry_backoff_ms = 1000
+retry_attempts = 2
+retry_backoff_ms = 500
 
 [coordinator]
-max_pages_per_domain = 10000
-batch_size = 2000
-batch_timeout_ms = 200
+max_pages_per_domain = 50000
+batch_size = 5000
+batch_timeout_ms = 100
 dedup_bloom_capacity = 100000000
 dedup_bloom_fp_rate = 0.001
 
 [politeness]
-default_crawl_delay_ms = 1000
-max_crawl_delay_ms = 30000
+default_crawl_delay_ms = 10
+max_crawl_delay_ms = 5000
 robots_cache_ttl_secs = 86400
 respect_robots_txt = true
-adaptive_throttling = true
+adaptive_throttling = false
 
 [storage]
 content_dir = "./crawled_data"

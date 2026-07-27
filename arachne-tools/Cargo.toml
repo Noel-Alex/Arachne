@@ -9,12 +9,17 @@ description = "Tools and stress testing utilities for Arachne"
 name = "stress-test"
 path = "src/bin/stress_test.rs"
 
+[[bin]]
+name = "stress-test-1m"
+path = "src/bin/stress_test_1m.rs"
+
 [dependencies]
 arachne-core = { path = "../arachne-core" }
 tokio = { workspace = true }
 async-nats = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+bincode = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

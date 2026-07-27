@@ -134,6 +134,40 @@ impl ArachneRepo {
         Ok(())
     }
 
+    /// High-throughput parallel batch insertion for ScyllaDB.
+    pub async fn insert_crawl_results_batch(&self, results: &[(String, CrawlResult)]) -> Result<()> {
+        let mut futures = FuturesUnordered::new();
+        let timestamp = chrono::Utc::now().timestamp_millis();
+
+        for (domain, result) in results {
+            let stmt = &self.insert_crawl_result_stmt;
+            let session = &self.session;
+            futures.push(async move {
+                session.execute(
+                    stmt,
+                    (
+                        domain.as_str(),
+                        result.source_url.as_str(),
+                        result.job_id,
+                        result.status.as_i32(),
+                        result.content_length.map(|l| l as i32),
+                        result.content_hash.as_deref(),
+                        result.title.as_deref(),
+                        result.language.as_deref(),
+                        result.content_ref.as_deref(),
+                        timestamp,
+                        result.crawl_duration_ms as i32,
+                    ),
+                ).await
+            });
+        }
+
+        while let Some(res) = futures.next().await {
+            res?;
+        }
+        Ok(())
+    }
+
     pub async fn check_url_exists(&self, domain: &str, url: &str) -> Result<bool> {
         let rows = self.session
             .execute(&self.check_url_exists_stmt, (domain, url))

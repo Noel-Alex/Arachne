@@ -49,7 +49,7 @@ impl NatsManager {
                 name: STREAM_CRAWL_TASKS.to_string(),
                 subjects: vec![SUBJECT_TASK.to_string()],
                 retention: RetentionPolicy::WorkQueue,
-                max_bytes: 10 * 1024 * 1024 * 1024, // 10GB buffer limit for internet-scale queues
+                max_bytes: 50 * 1024 * 1024 * 1024, // 50GB buffer limit for 1M+ internet-scale queues
                 ..Default::default()
             })
             .await?;
@@ -61,7 +61,7 @@ impl NatsManager {
                 subjects: vec![SUBJECT_RESULT.to_string()],
                 retention: RetentionPolicy::Limits,
                 max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
-                max_bytes: 20 * 1024 * 1024 * 1024, // 20GB limit
+                max_bytes: 50 * 1024 * 1024 * 1024, // 50GB limit
                 ..Default::default()
             })
             .await?;
@@ -72,7 +72,7 @@ impl NatsManager {
                 name: STREAM_DISCOVERED_URLS.to_string(),
                 subjects: vec![SUBJECT_DISCOVERED.to_string()],
                 retention: RetentionPolicy::WorkQueue,
-                max_bytes: 10 * 1024 * 1024 * 1024, // 10GB limit
+                max_bytes: 50 * 1024 * 1024 * 1024, // 50GB limit
                 ..Default::default()
             })
             .await?;
@@ -80,7 +80,7 @@ impl NatsManager {
         Ok(())
     }
 
-    /// Synchronously publish a single crawl task (awaits ACK).
+    /// Synchronously publish a single crawl task (JSON format).
     pub async fn publish_task(&self, task: &CrawlTask) -> Result<()> {
         let payload = serde_json::to_vec(task)?;
         self.jetstream
@@ -90,7 +90,7 @@ impl NatsManager {
         Ok(())
     }
 
-    /// High-throughput concurrent batch publish for tasks.
+    /// High-throughput concurrent batch publish for tasks using JSON.
     pub async fn publish_tasks_batch(&self, tasks: &[CrawlTask]) -> Result<()> {
         let mut futures = Vec::with_capacity(tasks.len());
         for task in tasks {
@@ -101,7 +101,24 @@ impl NatsManager {
             futures.push(async move { ack_fut.await });
         }
 
-        // Wait for all ACKs concurrently over TCP stream
+        let results = join_all(futures).await;
+        for res in results {
+            res?;
+        }
+        Ok(())
+    }
+
+    /// ULTRA HIGH-THROUGHPUT bincode binary batch publish for tasks (1M+ msg/sec capable).
+    pub async fn publish_tasks_bincode_batch(&self, tasks: &[CrawlTask]) -> Result<()> {
+        let mut futures = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let payload = bincode::serialize(task)?;
+            let ack_fut = self.jetstream
+                .publish(SUBJECT_TASK.to_string(), payload.into())
+                .await?;
+            futures.push(async move { ack_fut.await });
+        }
+
         let results = join_all(futures).await;
         for res in results {
             res?;

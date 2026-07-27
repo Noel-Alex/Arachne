@@ -120,6 +120,9 @@ async fn process_results(
             fetch_res = consumer.fetch().max_messages(batch_size).messages() => {
                 match fetch_res {
                     Ok(mut messages) => {
+                        let mut db_batch = Vec::new();
+                        let mut msgs_to_ack = Vec::new();
+
                         while let Some(msg_res) = messages.next().await {
                             match msg_res {
                                 Ok(msg) => {
@@ -131,19 +134,24 @@ async fn process_results(
                                         }
 
                                         let domain_name = result.domain.clone().unwrap_or_else(|| "unknown".to_string());
-                                        if let Err(e) = repo.insert_crawl_result(&domain_name, &result).await {
-                                            error!("Failed to persist result to ScyllaDB for URL {}: {:?}", result.source_url, e);
-                                        }
-
-                                        let _ = msg.ack().await;
+                                        db_batch.push((domain_name, result));
+                                        msgs_to_ack.push(msg);
                                     } else {
-                                        warn!("Failed to deserialize CrawlResult from NATS message");
                                         let _ = msg.ack().await;
                                     }
                                 }
                                 Err(e) => {
                                     warn!("Error consuming from result stream: {:?}", e);
                                 }
+                            }
+                        }
+
+                        if !db_batch.is_empty() {
+                            if let Err(e) = repo.insert_crawl_results_batch(&db_batch).await {
+                                error!("Failed to batch persist results to ScyllaDB: {:?}", e);
+                            }
+                            for msg in msgs_to_ack {
+                                let _ = msg.ack().await;
                             }
                         }
                     }

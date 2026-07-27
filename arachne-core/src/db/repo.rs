@@ -3,6 +3,7 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{FuturesUnordered, StreamExt};
+use scylla::batch::{Batch, BatchType};
 use scylla::{prepared_statement::PreparedStatement, Session, SessionBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -134,37 +135,34 @@ impl ArachneRepo {
         Ok(())
     }
 
-    /// High-throughput parallel batch insertion for ScyllaDB.
+    /// High-throughput ScyllaDB Unlogged Batch insertion (shard-aware, single round-trip).
     pub async fn insert_crawl_results_batch(&self, results: &[(String, CrawlResult)]) -> Result<()> {
-        let mut futures = FuturesUnordered::new();
+        if results.is_empty() {
+            return Ok(());
+        }
+
+        let mut batch = Batch::new(BatchType::Unlogged);
+        let mut batch_values = Vec::with_capacity(results.len());
         let timestamp = chrono::Utc::now().timestamp_millis();
 
         for (domain, result) in results {
-            let stmt = &self.insert_crawl_result_stmt;
-            let session = &self.session;
-            futures.push(async move {
-                session.execute(
-                    stmt,
-                    (
-                        domain.as_str(),
-                        result.source_url.as_str(),
-                        result.job_id,
-                        result.status.as_i32(),
-                        result.content_length.map(|l| l as i32),
-                        result.content_hash.as_deref(),
-                        result.title.as_deref(),
-                        result.language.as_deref(),
-                        result.content_ref.as_deref(),
-                        timestamp,
-                        result.crawl_duration_ms as i32,
-                    ),
-                ).await
-            });
+            batch.append_statement(self.insert_crawl_result_stmt.clone());
+            batch_values.push((
+                domain.clone(),
+                result.source_url.clone(),
+                result.job_id,
+                result.status.as_i32(),
+                result.content_length.map(|l| l as i32),
+                result.content_hash.clone(),
+                result.title.clone(),
+                result.language.clone(),
+                result.content_ref.clone(),
+                timestamp,
+                result.crawl_duration_ms as i32,
+            ));
         }
 
-        while let Some(res) = futures.next().await {
-            res?;
-        }
+        self.session.batch(&batch, batch_values).await?;
         Ok(())
     }
 

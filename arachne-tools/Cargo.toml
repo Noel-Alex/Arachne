@@ -13,6 +13,10 @@ path = "src/bin/stress_test.rs"
 name = "stress-test-1m"
 path = "src/bin/stress_test_1m.rs"
 
+[[bin]]
+name = "scylla-benchmark"
+path = "src/bin/scylla_benchmark.rs"
+
 [dependencies]
 arachne-core = { path = "../arachne-core" }
 tokio = { workspace = true }
@@ -25,3 +29,4 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 chrono = { workspace = true }
 uuid = { workspace = true }
+futures = { workspace = true }

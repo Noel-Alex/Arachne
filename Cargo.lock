@@ -197,6 +197,7 @@ dependencies = [
  "async-nats 0.40.0",
  "bincode",
  "chrono",
+ "futures",
  "serde",
  "serde_json",
  "tokio",

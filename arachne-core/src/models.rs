@@ -5,6 +5,26 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+/// Versioned envelope wrapper for all wire messages across NATS.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VersionedEnvelope<T> {
+    pub version: u32,
+    pub event_id: Uuid,
+    pub timestamp_ms: i64,
+    pub payload: T,
+}
+
+impl<T> VersionedEnvelope<T> {
+    pub fn new(payload: T) -> Self {
+        Self {
+            version: 1,
+            event_id: Uuid::new_v4(),
+            timestamp_ms: Utc::now().timestamp_millis(),
+            payload,
+        }
+    }
+}
+
 /// Represents a crawl job configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawlJob {
@@ -28,6 +48,43 @@ pub struct CrawlJob {
     pub topic_keywords: Option<Vec<String>>,
     pub store_raw_html: bool,
     pub store_text: bool,
+}
+
+impl CrawlJob {
+    /// Evaluate whether a candidate URL and depth adhere to job rules.
+    pub fn is_url_allowed(&self, candidate_url: &str, current_depth: u32, candidate_root_domain: &str) -> bool {
+        // 1. Max depth check
+        if let Some(max_depth) = self.max_depth {
+            if current_depth > max_depth {
+                return false;
+            }
+        }
+
+        // 2. Allowed domains check
+        if let Some(ref domains) = self.allowed_domains {
+            if !domains.is_empty() && !domains.iter().any(|d| d.eq_ignore_ascii_case(candidate_root_domain)) {
+                return false;
+            }
+        }
+
+        // 3. Exclude patterns check
+        if let Some(ref excludes) = self.exclude_patterns {
+            for pattern in excludes {
+                if candidate_url.contains(pattern) {
+                    return false;
+                }
+            }
+        }
+
+        // 4. URL patterns check
+        if let Some(ref includes) = self.url_patterns {
+            if !includes.is_empty() && !includes.iter().any(|p| candidate_url.contains(p)) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 impl Default for CrawlJob {
@@ -101,6 +158,12 @@ pub struct DiscoveredUrl {
     pub source_url: String,
     pub job_id: Uuid,
     pub depth: u32,
+}
+
+/// Batch container for discovered URLs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscoveredUrlBatch {
+    pub urls: Vec<DiscoveredUrl>,
 }
 
 /// Status of crawling a single URL.

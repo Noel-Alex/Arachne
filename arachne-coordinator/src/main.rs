@@ -5,7 +5,7 @@ use arachne_core::{
     dedup::Deduplicator,
     domain, logging,
     metrics::CrawlerMetrics,
-    models::{CrawlResult, CrawlTask, DiscoveredUrl},
+    models::{CrawlJob, CrawlResult, CrawlTask, DiscoveredUrl},
     nats::NatsManager,
 };
 use dashmap::DashMap;
@@ -55,7 +55,7 @@ async fn main() -> Result<()> {
 
     let domain_counts = Arc::new(DashMap::<String, i64>::new());
     let job_counts = Arc::new(DashMap::<Uuid, u64>::new());
-    let job_limits = Arc::new(DashMap::<Uuid, Option<u64>>::new());
+    let jobs_cache = Arc::new(DashMap::<Uuid, Option<CrawlJob>>::new());
 
     let max_pages_per_domain = config.coordinator.max_pages_per_domain;
     let batch_size = config.coordinator.batch_size;
@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         Arc::clone(&deduplicator),
         Arc::clone(&domain_counts),
         Arc::clone(&job_counts),
-        Arc::clone(&job_limits),
+        Arc::clone(&jobs_cache),
         Arc::clone(&metrics),
         max_pages_per_domain,
         batch_size,
@@ -149,9 +149,11 @@ async fn process_results(
                         if !db_batch.is_empty() {
                             if let Err(e) = repo.insert_crawl_results_batch(&db_batch).await {
                                 error!("Failed to batch persist results to ScyllaDB: {:?}", e);
-                            }
-                            for msg in msgs_to_ack {
-                                let _ = msg.ack().await;
+                                // DO NOT ACK if DB insertion fails - allow NATS redelivery!
+                            } else {
+                                for msg in msgs_to_ack {
+                                    let _ = msg.ack().await;
+                                }
                             }
                         }
                     }
@@ -171,7 +173,7 @@ async fn process_discovered_urls(
     deduplicator: Arc<Deduplicator>,
     domain_counts: Arc<DashMap<String, i64>>,
     job_counts: Arc<DashMap<Uuid, u64>>,
-    job_limits: Arc<DashMap<Uuid, Option<u64>>>,
+    jobs_cache: Arc<DashMap<Uuid, Option<CrawlJob>>>,
     metrics: Arc<CrawlerMetrics>,
     max_pages_per_domain: i64,
     batch_size: usize,
@@ -202,7 +204,13 @@ async fn process_discovered_urls(
                         while let Some(msg_res) = messages.next().await {
                             match msg_res {
                                 Ok(msg) => {
-                                    if let Ok(url_msg) = serde_json::from_slice::<DiscoveredUrl>(&msg.payload) {
+                                    // Parse both Vec<DiscoveredUrl> and single DiscoveredUrl
+                                    if let Ok(url_vec) = serde_json::from_slice::<Vec<DiscoveredUrl>>(&msg.payload) {
+                                        for url_msg in url_vec {
+                                            candidates.push(url_msg);
+                                        }
+                                        raw_msgs.push(msg);
+                                    } else if let Ok(url_msg) = serde_json::from_slice::<DiscoveredUrl>(&msg.payload) {
                                         candidates.push(url_msg);
                                         raw_msgs.push(msg);
                                     } else {
@@ -223,33 +231,35 @@ async fn process_discovered_urls(
 
                         let mut db_checks = Vec::new();
                         let mut filtered_candidates = Vec::new();
-                        let mut candidate_msgs = Vec::new();
 
-                        for (idx, candidate) in candidates.into_iter().enumerate() {
-                            let msg = &raw_msgs[idx];
+                        for candidate in candidates {
                             let normalized_url = match domain::normalize_url(&candidate.url) {
                                 Some(u) => u,
-                                None => {
-                                    let _ = msg.ack().await;
-                                    continue;
-                                }
+                                None => continue,
                             };
-
-                            if deduplicator.probably_seen(&normalized_url) {
-                                metrics.urls_deduped.inc();
-                                let _ = msg.ack().await;
-                                continue;
-                            }
 
                             let root_domain = domain::extract_root_domain(&normalized_url)
                                 .unwrap_or_else(|| "unknown".to_string());
 
-                            db_checks.push((root_domain.clone(), normalized_url.clone()));
+                            // Check job policy
+                            let job_id = candidate.job_id;
+                            if !jobs_cache.contains_key(&job_id) {
+                                let loaded = repo.get_job(&job_id).await.ok().flatten();
+                                jobs_cache.insert(job_id, loaded);
+                            }
+
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref() {
+                                if !job.is_url_allowed(&normalized_url, candidate.depth, &root_domain) {
+                                    debug!(url = %normalized_url, "URL disallowed by job crawl policy");
+                                    continue;
+                                }
+                            }
+
+                            db_checks.push((root_domain.clone(), job_id, normalized_url.clone()));
 
                             let mut candidate_copy = candidate;
                             candidate_copy.url = normalized_url;
                             filtered_candidates.push((root_domain, candidate_copy));
-                            candidate_msgs.push(msg);
                         }
 
                         let existing_urls = match repo.check_urls_batch(db_checks).await {
@@ -261,42 +271,31 @@ async fn process_discovered_urls(
                         };
 
                         let mut tasks_to_publish = Vec::new();
-                        let mut msgs_to_ack = Vec::new();
 
-                        for (idx, (root_domain, candidate)) in filtered_candidates.into_iter().enumerate() {
-                            let msg = candidate_msgs[idx];
-
+                        for (root_domain, candidate) in filtered_candidates {
                             if existing_urls.contains(&candidate.url) {
                                 deduplicator.mark_seen(&candidate.url);
                                 metrics.urls_deduped.inc();
-                                let _ = msg.ack().await;
                                 continue;
                             }
 
                             let d_count = *domain_counts.entry(root_domain.clone()).or_insert(0);
                             if d_count >= max_pages_per_domain {
                                 debug!(domain = %root_domain, "Domain limit reached, skipping URL");
-                                let _ = msg.ack().await;
                                 continue;
                             }
 
                             let job_id = candidate.job_id;
-                            if !job_limits.contains_key(&job_id) {
-                                if let Ok(Some(job)) = repo.get_job(&job_id).await {
-                                    job_limits.insert(job_id, job.max_pages);
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref() {
+                                if let Some(limit) = job.max_pages {
+                                    let current_job_count = *job_counts.entry(job_id).or_insert(0);
+                                    if current_job_count >= limit {
+                                        debug!(job_id = %job_id, "Job limit reached, skipping URL");
+                                        continue;
+                                    }
                                 }
                             }
 
-                            if let Some(Some(limit)) = job_limits.get(&job_id).map(|r| *r) {
-                                let current_job_count = *job_counts.entry(job_id).or_insert(0);
-                                if current_job_count >= limit {
-                                    debug!(job_id = %job_id, "Job limit reached, skipping URL");
-                                    let _ = msg.ack().await;
-                                    continue;
-                                }
-                            }
-
-                            deduplicator.mark_seen(&candidate.url);
                             *domain_counts.entry(root_domain.clone()).or_insert(0) += 1;
                             *job_counts.entry(job_id).or_insert(0) += 1;
 
@@ -309,16 +308,23 @@ async fn process_discovered_urls(
                             };
 
                             tasks_to_publish.push(task);
-                            msgs_to_ack.push(msg);
                         }
 
                         if !tasks_to_publish.is_empty() {
                             if let Err(e) = nats.publish_tasks_batch(&tasks_to_publish).await {
                                 error!("Failed to batch dispatch tasks to NATS: {:?}", e);
                             } else {
-                                for msg in msgs_to_ack {
+                                // Mark seen in Bloom ONLY AFTER successful NATS task publication
+                                for t in &tasks_to_publish {
+                                    deduplicator.mark_seen(&t.url);
+                                }
+                                for msg in raw_msgs {
                                     let _ = msg.ack().await;
                                 }
+                            }
+                        } else {
+                            for msg in raw_msgs {
+                                let _ = msg.ack().await;
                             }
                         }
                     }

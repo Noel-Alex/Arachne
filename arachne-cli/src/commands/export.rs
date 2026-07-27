@@ -4,11 +4,12 @@ use arachne_core::db::ArachneRepo;
 use std::fs::File;
 use std::io::Write;
 use tracing::info;
+use uuid::Uuid;
 
 /// Export crawled data in various formats (JSON, CSV).
 pub async fn run(
     config: ArachneConfig,
-    _job_id: Option<String>,
+    job_id: Option<String>,
     domain: Option<String>,
     format: String,
     output: String,
@@ -23,11 +24,18 @@ pub async fn run(
         }
     };
 
+    let filter_job_uuid = job_id.and_then(|id_str| Uuid::parse_str(&id_str).ok());
+
     let repo = ArachneRepo::new(&config.scylla)
         .await
         .context("Failed to connect to ScyllaDB")?;
 
-    let pages = repo.get_pages_by_domain(&target_domain).await?;
+    let mut pages = repo.get_pages_by_domain(&target_domain).await?;
+
+    if let Some(target_uuid) = filter_job_uuid {
+        pages.retain(|p| p.job_id == target_uuid);
+    }
+
     println!("Found {} pages for domain '{}'", pages.len(), target_domain);
 
     let output_format = format.to_lowercase();
@@ -51,15 +59,15 @@ pub async fn run(
             let mut file = File::create(&file_path)?;
             writeln!(
                 file,
-                "domain,url,job_id,http_status,content_length,content_hash,title,language,content_ref,crawled_at"
+                "domain,job_id,url,http_status,content_length,content_hash,title,language,content_ref,crawled_at"
             )?;
             for page in pages {
                 writeln!(
                     file,
                     "\"{}\",\"{}\",\"{}\",{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
                     page.domain,
-                    page.url,
                     page.job_id,
+                    page.url,
                     page.http_status,
                     page.content_length.unwrap_or(0),
                     page.content_hash.unwrap_or_default(),

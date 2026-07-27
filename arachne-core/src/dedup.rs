@@ -1,10 +1,10 @@
-//! URL deduplication using Bloom filter.
+//! Fast, memory-efficient URL deduplication.
 
 use bloomfilter::Bloom;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
-/// Fast, memory-efficient deduplication of URLs.
+/// Fast deduplication engine for URLs using Bloom filter.
 pub struct Deduplicator {
     bloom: RwLock<Bloom<String>>,
     count: AtomicU64,
@@ -20,29 +20,38 @@ impl Deduplicator {
         }
     }
 
-    /// Check if a URL has probably been seen before.
+    /// Check if a URL has probably been seen before (does not allocate).
     pub fn probably_seen(&self, url: &str) -> bool {
-        let guard = self.bloom.read().unwrap();
+        let guard = match self.bloom.read() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         guard.check(&url.to_string())
     }
 
     /// Mark a single URL as seen.
     pub fn mark_seen(&self, url: &str) {
-        let mut guard = self.bloom.write().unwrap();
+        let mut guard = match self.bloom.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         guard.set(&url.to_string());
         self.count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mark multiple URLs as seen.
     pub fn mark_many(&self, urls: &[String]) {
-        let mut guard = self.bloom.write().unwrap();
+        let mut guard = match self.bloom.write() {
+            Ok(g) => g,
+            Err(e) => e.into_inner(),
+        };
         for url in urls {
             guard.set(url);
         }
         self.count.fetch_add(urls.len() as u64, Ordering::Relaxed);
     }
 
-    /// Return the number of unique items added.
+    /// Return the estimated number of unique items added.
     pub fn estimated_count(&self) -> u64 {
         self.count.load(Ordering::Relaxed)
     }

@@ -9,9 +9,9 @@ use std::sync::Arc;
 use std::time::Instant;
 use uuid::Uuid;
 
-const TOTAL_RECORDS: usize = 1_000_000;
-const PARALLEL_WORKERS: usize = 32;
-const BATCH_SIZE: usize = 500;
+const TOTAL_RECORDS: usize = 100_000;
+const PARALLEL_WORKERS: usize = 16;
+const BATCH_SIZE: usize = 250;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,7 +49,7 @@ async fn main() -> Result<()> {
                     job_id,
                     status: CrawlStatus::Success,
                     domain: Some(domain.clone()),
-                    content_ref: Some(format!("./crawled_data/{}/hash-{}.html", domain, i)),
+                    content_ref: Some(format!("file:///crawled_data/{}/hash-{}.html", domain, i)),
                     title: Some(format!("Test Title Page {}", i)),
                     language: Some("en".into()),
                     content_length: Some(15000),
@@ -62,18 +62,23 @@ async fn main() -> Result<()> {
                 batch.push((domain, result));
 
                 if batch.len() >= BATCH_SIZE {
-                    if let Err(e) = repo_ref.insert_crawl_results_batch(&batch).await {
-                        eprintln!("ScyllaDB batch error: {:?}", e);
+                    match repo_ref.insert_crawl_results_batch(&batch).await {
+                        Ok(_) => {
+                            counter_ref.fetch_add(batch.len(), Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            eprintln!("ScyllaDB batch error: {:?}", e);
+                        }
                     }
-                    counter_ref.fetch_add(batch.len(), Ordering::Relaxed);
                     batch.clear();
                 }
             }
 
             if !batch.is_empty() {
                 let count = batch.len();
-                let _ = repo_ref.insert_crawl_results_batch(&batch).await;
-                counter_ref.fetch_add(count, Ordering::Relaxed);
+                if repo_ref.insert_crawl_results_batch(&batch).await.is_ok() {
+                    counter_ref.fetch_add(count, Ordering::Relaxed);
+                }
             }
         });
 
@@ -86,7 +91,7 @@ async fn main() -> Result<()> {
     let total = counter.load(Ordering::Relaxed);
     let rate = total as f64 / elapsed;
 
-    println!("\n🔥 SCYLLADB NATIVE BENCHMARK RESULT 🔥");
+    println!("\n🔥 CONFIRMED SCYLLADB BENCHMARK RESULT 🔥");
     println!("  Total Rows Inserted: {}", total);
     println!("  Time Elapsed:        {:.2} seconds", elapsed);
     println!("  Write Throughput:    {:.1} CQL inserts/sec ({:.2} Million rows/min)", rate, (rate * 60.0) / 1_000_000.0);

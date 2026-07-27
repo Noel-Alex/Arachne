@@ -24,8 +24,8 @@ pub struct DomainMetadata {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CrawledPageRecord {
     pub domain: String,
-    pub url: String,
     pub job_id: Uuid,
+    pub url: String,
     pub http_status: i32,
     pub content_length: Option<i32>,
     pub content_hash: Option<String>,
@@ -63,11 +63,11 @@ impl ArachneRepo {
 
         // Prepare statements
         let insert_crawl_result_stmt = session
-            .prepare("INSERT INTO crawled_pages (domain, url, job_id, http_status, content_length, content_hash, title, language, content_ref, crawled_at, crawl_duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .prepare("INSERT INTO crawled_pages (domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at, crawl_duration_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
             .await?;
 
         let check_url_exists_stmt = session
-            .prepare("SELECT url FROM crawled_pages WHERE domain = ? AND url = ?")
+            .prepare("SELECT url FROM crawled_pages WHERE domain = ? AND job_id = ? AND url = ?")
             .await?;
 
         let insert_job_stmt = session
@@ -95,7 +95,7 @@ impl ArachneRepo {
             .await?;
 
         let get_pages_by_domain_stmt = session
-            .prepare("SELECT domain, url, job_id, http_status, content_length, content_hash, title, language, content_ref, crawled_at FROM crawled_pages WHERE domain = ?")
+            .prepare("SELECT domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at FROM crawled_pages WHERE domain = ?")
             .await?;
 
         Ok(Self {
@@ -119,8 +119,8 @@ impl ArachneRepo {
                 &self.insert_crawl_result_stmt,
                 (
                     domain,
-                    &result.source_url,
                     result.job_id,
+                    &result.source_url,
                     result.status.as_i32(),
                     result.content_length.map(|l| l as i32),
                     result.content_hash.as_deref(),
@@ -149,8 +149,8 @@ impl ArachneRepo {
             batch.append_statement(self.insert_crawl_result_stmt.clone());
             batch_values.push((
                 domain.clone(),
-                result.source_url.clone(),
                 result.job_id,
+                result.source_url.clone(),
                 result.status.as_i32(),
                 result.content_length.map(|l| l as i32),
                 result.content_hash.clone(),
@@ -166,21 +166,21 @@ impl ArachneRepo {
         Ok(())
     }
 
-    pub async fn check_url_exists(&self, domain: &str, url: &str) -> Result<bool> {
+    pub async fn check_url_exists(&self, domain: &str, job_id: Uuid, url: &str) -> Result<bool> {
         let rows = self.session
-            .execute(&self.check_url_exists_stmt, (domain, url))
+            .execute(&self.check_url_exists_stmt, (domain, job_id, url))
             .await?
             .rows_or_empty();
         Ok(!rows.is_empty())
     }
 
-    pub async fn check_urls_batch(&self, urls: Vec<(String, String)>) -> Result<HashSet<String>> {
+    pub async fn check_urls_batch(&self, urls: Vec<(String, Uuid, String)>) -> Result<HashSet<String>> {
         let mut futures = FuturesUnordered::new();
-        for (domain, url) in urls {
+        for (domain, job_id, url) in urls {
             let stmt = &self.check_url_exists_stmt;
             let session = &self.session;
             futures.push(async move {
-                let exists = session.execute(stmt, (&domain, &url)).await?.rows_or_empty().len() > 0;
+                let exists = session.execute(stmt, (&domain, job_id, &url)).await?.rows_or_empty().len() > 0;
                 if exists {
                     Ok::<_, anyhow::Error>(Some(url))
                 } else {
@@ -259,10 +259,10 @@ impl ArachneRepo {
         let mut records = Vec::new();
         let rows = self.session.execute(&self.get_pages_by_domain_stmt, (domain,)).await?.rows_or_empty();
         for row in rows {
-            let (d, u, j, s, l, h, t, lang, r, c_ts): (
-                String,
+            let (d, j, u, s, l, h, t, lang, r, c_ts): (
                 String,
                 Uuid,
+                String,
                 i32,
                 Option<i32>,
                 Option<String>,
@@ -274,8 +274,8 @@ impl ArachneRepo {
 
             records.push(CrawledPageRecord {
                 domain: d,
-                url: u,
                 job_id: j,
+                url: u,
                 http_status: s,
                 content_length: l,
                 content_hash: h,

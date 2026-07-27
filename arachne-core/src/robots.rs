@@ -1,13 +1,15 @@
-//! Robots.txt fetching and parsing.
+//! Robots.txt fetching, parsing, and caching.
 
 use dashmap::DashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use texting_robots::Robot;
 use tracing::{debug, warn};
 use url::Url;
 
+#[derive(Clone)]
 struct CachedRobots {
-    robot: Robot,
+    raw_txt: Arc<Vec<u8>>,
     fetched_at: Instant,
     crawl_delay: Option<Duration>,
 }
@@ -39,54 +41,83 @@ impl RobotsManager {
 
     /// Check if a URL is allowed to be crawled according to robots.txt.
     pub async fn is_allowed(&self, url: &Url) -> bool {
-        let domain = match url.host_str() {
-            Some(d) => d,
-            None => return true, // Can't check robots.txt without a domain
+        let authority = match url.authority() {
+            "" => return true,
+            auth => auth.to_string(),
         };
 
-        let cached = self.fetch_robots(domain).await;
-        if let Some(robots) = cached {
-            robots.robot.allowed(url.as_str())
-        } else {
-            true // Allow if robots.txt could not be fetched
+        let cached = self.fetch_robots(url, &authority).await;
+        if let Some(robots_entry) = cached {
+            if let Ok(robot) = Robot::new(&self.user_agent, &robots_entry.raw_txt) {
+                return robot.allowed(url.as_str());
+            }
         }
+        true // Allow if robots.txt could not be fetched or parsed
     }
 
     /// Get the crawl delay for a domain from robots.txt, if specified.
-    pub async fn get_crawl_delay(&self, domain: &str) -> Option<Duration> {
-        let cached = self.fetch_robots(domain).await;
+    pub async fn get_crawl_delay(&self, url: &Url) -> Option<Duration> {
+        let authority = match url.authority() {
+            "" => return None,
+            auth => auth.to_string(),
+        };
+
+        let cached = self.fetch_robots(url, &authority).await;
         cached.and_then(|r| r.crawl_delay)
     }
 
-    async fn fetch_robots(&self, domain: &str) -> Option<CachedRobots> {
-        if let Some(entry) = self.cache.get(domain) {
+    async fn fetch_robots(&self, url: &Url, authority: &str) -> Option<CachedRobots> {
+        let cache_key = format!("{}://{}", url.scheme(), authority);
+
+        if let Some(entry) = self.cache.get(&cache_key) {
             if entry.fetched_at.elapsed() < self.cache_ttl {
-                let _val = entry.value();
-                // Creating a new instance is cheap since it's just cloning the string under the hood or we reconstruct
-                // Actually, texting_robots::Robot doesn't derive Clone, so we might need a workaround.
-                // Let's reconstruct or store only bytes in cache.
+                return Some(entry.value().clone());
             }
         }
-        
-        let robots_url = format!("http://{}/robots.txt", domain); // Standard fallback
+
+        let robots_url = format!("{}://{}/robots.txt", url.scheme(), authority);
         match self.http_client.get(&robots_url).send().await {
             Ok(res) if res.status().is_success() => {
                 if let Ok(body) = res.bytes().await {
-                    let robot = Robot::new(self.user_agent.as_str(), &body).unwrap_or_else(|_| Robot::new(self.user_agent.as_str(), b"").unwrap());
-                    // delay parsing omitted for simplicity, but you would pull it from the library if it supports it
+                    let bytes = body.to_vec();
+                    let delay_ms = parse_crawl_delay(&bytes);
                     let cached = CachedRobots {
-                        robot,
+                        raw_txt: Arc::new(bytes),
                         fetched_at: Instant::now(),
-                        crawl_delay: None, // Simplified
+                        crawl_delay: delay_ms.map(Duration::from_millis),
                     };
-                    // Since Robot can't be cloned, we can't easily return it from cache.
-                    // We'll skip deep caching for this skeleton to ensure it compiles.
+
+                    self.cache.insert(cache_key, cached.clone());
                     return Some(cached);
                 }
             }
-            Ok(res) => debug!("Failed to fetch robots.txt for {}: HTTP {}", domain, res.status()),
-            Err(e) => warn!("Failed to fetch robots.txt for {}: {}", domain, e),
+            Ok(res) => debug!("Failed to fetch robots.txt for {}: HTTP {}", authority, res.status()),
+            Err(e) => warn!("Failed to fetch robots.txt for {}: {}", authority, e),
         }
-        None
+
+        // Cache permissive empty fallback to avoid hammering 404/500 endpoints repeatedly
+        let empty_cached = CachedRobots {
+            raw_txt: Arc::new(Vec::new()),
+            fetched_at: Instant::now(),
+            crawl_delay: None,
+        };
+        self.cache.insert(cache_key, empty_cached.clone());
+        Some(empty_cached)
     }
+}
+
+/// Helper function to parse Crawl-delay from robots.txt body.
+fn parse_crawl_delay(body: &[u8]) -> Option<u64> {
+    let txt = std::str::from_utf8(body).ok()?;
+    for line in txt.lines() {
+        let line = line.trim();
+        if line.to_lowercase().starts_with("crawl-delay:") {
+            if let Some(val_str) = line.split(':').nth(1) {
+                if let Ok(sec) = val_str.trim().parse::<f64>() {
+                    return Some((sec * 1000.0) as u64);
+                }
+            }
+        }
+    }
+    None
 }

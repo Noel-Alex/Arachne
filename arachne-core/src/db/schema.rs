@@ -28,13 +28,13 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
         )
         .await?;
 
-    // crawled_pages
+    // crawled_pages (Job-scoped primary key for recrawl history and multi-job isolation)
     session
         .query(
             "CREATE TABLE IF NOT EXISTS arachne.crawled_pages (
                 domain text,
-                url text,
                 job_id uuid,
+                url text,
                 http_status int,
                 content_type text,
                 content_length int,
@@ -44,7 +44,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 content_ref text,
                 crawled_at bigint,
                 crawl_duration_ms int,
-                PRIMARY KEY ((domain), url)
+                PRIMARY KEY ((domain), job_id, url)
             )",
             &[],
         )

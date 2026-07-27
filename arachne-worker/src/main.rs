@@ -3,7 +3,7 @@ use arachne_core::{
     config::ArachneConfig,
     content::{extractor, filter},
     domain, logging,
-    metrics::CrawlerMetrics,
+    metrics::{self, CrawlerMetrics},
     models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl},
     nats::NatsManager,
     politeness::PolitenessLimiter,
@@ -13,21 +13,22 @@ use chrono::Utc;
 use futures::StreamExt;
 use reqwest::Client;
 use sha2::{Digest, Sha256};
-use std::{
-    path::PathBuf,
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::{fs, io::AsyncWriteExt, sync::Semaphore, time::sleep};
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::fs;
+use tokio::io::AsyncWriteExt;
+use tokio::sync::Semaphore;
+use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 use url::Url;
 
 struct WorkerContext {
-    config: Arc<ArachneConfig>,
+    config: ArachneConfig,
     nats: Arc<NatsManager>,
+    robots: RobotsManager,
+    politeness: PolitenessLimiter,
     http_client: Client,
-    robots: Arc<RobotsManager>,
-    politeness: Arc<PolitenessLimiter>,
     metrics: Arc<CrawlerMetrics>,
 }
 
@@ -36,14 +37,15 @@ async fn main() -> Result<()> {
     logging::init_logging();
     info!("Starting Arachne Worker");
 
-    let config = Arc::new(ArachneConfig::load(None).context("Failed to load configuration")?);
+    let config = ArachneConfig::load(None).context("Failed to load configuration")?;
 
     let metrics = Arc::new(CrawlerMetrics::new());
-    let metrics_clone = metrics.clone();
+    let metrics_clone = Arc::clone(&metrics);
     let metrics_port = config.metrics.port;
     tokio::spawn(async move {
-        if let Err(e) = arachne_core::metrics::serve_metrics(metrics_clone, metrics_port).await {
-            error!("Metrics server error: {}", e);
+        info!("Starting metrics server on port {}", metrics_port);
+        if let Err(e) = metrics::serve_metrics(metrics_clone, metrics_port).await {
+            error!("Metrics server failed: {:?}", e);
         }
     });
 
@@ -56,35 +58,47 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to ensure NATS streams")?;
 
+    let robots = RobotsManager::new(
+        &config.worker.user_agent,
+        Duration::from_secs(config.politeness.robots_cache_ttl_secs),
+    );
+
+    let politeness = PolitenessLimiter::new(config.politeness.default_crawl_delay_ms);
+
     let http_client = Client::builder()
         .user_agent(&config.worker.user_agent)
         .timeout(Duration::from_secs(config.worker.request_timeout_secs))
-        .build()?;
-
-    let robots = Arc::new(RobotsManager::new(
-        &config.worker.user_agent,
-        Duration::from_secs(config.politeness.robots_cache_ttl_secs),
-    ));
-    let politeness = Arc::new(PolitenessLimiter::new(
-        config.politeness.default_crawl_delay_ms,
-    ));
+        .connect_timeout(Duration::from_secs(config.worker.connect_timeout_secs))
+        .pool_max_idle_per_host(100)
+        .pool_idle_timeout(Duration::from_secs(90))
+        .tcp_keepalive(Duration::from_secs(60))
+        .tcp_nodelay(true)
+        .build()
+        .context("Failed to build HTTP client")?;
 
     let ctx = Arc::new(WorkerContext {
         config: config.clone(),
-        nats: nats.clone(),
-        http_client,
+        nats: Arc::clone(&nats),
         robots,
         politeness,
-        metrics,
+        http_client,
+        metrics: Arc::clone(&metrics),
     });
 
-    let max_concurrent = config.worker.max_concurrent_requests;
-    let semaphore = Arc::new(Semaphore::new(max_concurrent));
+    let worker_name = format!("worker-{}", uuid::Uuid::new_v4());
+    let consumer = nats
+        .create_task_consumer(&worker_name)
+        .await
+        .context("Failed to create NATS task consumer")?;
 
-    let consumer = nats.create_task_consumer("arachne-worker-1").await?;
-    info!("Listening for crawl tasks on CRAWL_TASKS stream");
+    let semaphore = Arc::new(Semaphore::new(config.worker.max_concurrent_requests));
+    info!(
+        worker_name = %worker_name,
+        max_concurrent = config.worker.max_concurrent_requests,
+        "Worker loop initialized"
+    );
 
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel::<()>(1);
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::broadcast::channel(1);
     let shutdown_tx_clone = shutdown_tx.clone();
 
     tokio::spawn(async move {
@@ -120,8 +134,11 @@ async fn main() -> Result<()> {
 
                                     tokio::spawn(async move {
                                         let _permit = permit;
-                                        process_task(ctx_clone, task).await;
-                                        let _ = msg.ack().await;
+                                        if process_task(ctx_clone, task).await {
+                                            let _ = msg.ack().await;
+                                        } else {
+                                            warn!("Task processing or result publish failed, leaving task unacknowledged for redelivery");
+                                        }
                                     });
                                 }
                                 Err(e) => {
@@ -143,17 +160,25 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
+async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     let start_time = Instant::now();
     ctx.metrics.active_tasks.inc();
+
+    // 1. SSRF & Egress Boundary Check
+    if !domain::is_safe_egress_url(&task.url) {
+        warn!(url = %task.url, "URL blocked by SSRF boundary guard");
+        let res = record_failure(&ctx, &task, CrawlStatus::FetchError("Blocked by SSRF boundary guard".into()), 0).await;
+        ctx.metrics.active_tasks.dec();
+        return res;
+    }
 
     let target_url = match Url::parse(&task.url) {
         Ok(u) => u,
         Err(e) => {
             error!(url = %task.url, "Invalid target URL: {}", e);
-            record_failure(&ctx, &task, CrawlStatus::FetchError(e.to_string()), 0).await;
+            let res = record_failure(&ctx, &task, CrawlStatus::FetchError(e.to_string()), 0).await;
             ctx.metrics.active_tasks.dec();
-            return;
+            return res;
         }
     };
 
@@ -162,12 +187,12 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
     if ctx.config.politeness.respect_robots_txt && !ctx.robots.is_allowed(&target_url).await {
         info!(url = %task.url, "URL blocked by robots.txt");
         ctx.metrics.urls_robots_blocked.inc();
-        record_failure(&ctx, &task, CrawlStatus::RobotsBlocked, 0).await;
+        let res = record_failure(&ctx, &task, CrawlStatus::RobotsBlocked, 0).await;
         ctx.metrics.active_tasks.dec();
-        return;
+        return res;
     }
 
-    if let Some(delay) = ctx.robots.get_crawl_delay(&domain).await {
+    if let Some(delay) = ctx.robots.get_crawl_delay(&target_url).await {
         ctx.politeness.set_domain_delay(&domain, delay);
     }
     ctx.politeness.wait_for_permission(&domain).await;
@@ -198,7 +223,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
     let response = match response_res {
         Some(r) => r,
         None => {
-            record_failure(
+            let res = record_failure(
                 &ctx,
                 &task,
                 CrawlStatus::FetchError("Max retries exceeded".into()),
@@ -206,13 +231,13 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
             )
             .await;
             ctx.metrics.active_tasks.dec();
-            return;
+            return res;
         }
     };
 
     let status_code = response.status().as_u16();
     if !response.status().is_success() {
-        record_failure(
+        let res = record_failure(
             &ctx,
             &task,
             CrawlStatus::HttpError(status_code),
@@ -220,7 +245,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
         )
         .await;
         ctx.metrics.active_tasks.dec();
-        return;
+        return res;
     }
 
     let content_type = response
@@ -232,7 +257,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
 
     if !filter::is_html_content_type(&content_type) {
         info!(url = %task.url, content_type = %content_type, "Skipping non-HTML content type");
-        record_failure(
+        let res = record_failure(
             &ctx,
             &task,
             CrawlStatus::InvalidContentType,
@@ -240,7 +265,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
         )
         .await;
         ctx.metrics.active_tasks.dec();
-        return;
+        return res;
     }
 
     let max_bytes = ctx.config.worker.max_content_size_bytes;
@@ -252,7 +277,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
             Ok(chunk) => {
                 if !filter::is_within_size_limit(body_bytes.len() + chunk.len(), max_bytes) {
                     warn!(url = %task.url, "Exceeded max content size");
-                    record_failure(
+                    let res = record_failure(
                         &ctx,
                         &task,
                         CrawlStatus::ContentTooLarge,
@@ -260,13 +285,13 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
                     )
                     .await;
                     ctx.metrics.active_tasks.dec();
-                    return;
+                    return res;
                 }
                 body_bytes.extend_from_slice(&chunk);
             }
             Err(e) => {
                 error!(url = %task.url, "Error reading response body stream: {}", e);
-                record_failure(
+                let res = record_failure(
                     &ctx,
                     &task,
                     CrawlStatus::FetchError(e.to_string()),
@@ -274,7 +299,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
                 )
                 .await;
                 ctx.metrics.active_tasks.dec();
-                return;
+                return res;
             }
         }
     }
@@ -300,7 +325,10 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
                     error!("Failed to write HTML content to storage: {}", e);
                     None
                 } else {
-                    Some(storage_path.to_string_lossy().to_string())
+                    let abs_path = fs::canonicalize(&storage_path)
+                        .await
+                        .unwrap_or(storage_path);
+                    Some(format!("file:///{}", abs_path.to_string_lossy().replace('\\', "/")))
                 }
             }
             Err(e) => {
@@ -342,6 +370,8 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
 
     if let Err(e) = ctx.nats.publish_result(&result).await {
         error!("Failed to publish crawl result to NATS: {}", e);
+        ctx.metrics.active_tasks.dec();
+        return false;
     }
 
     if !discovered_urls.is_empty() {
@@ -350,25 +380,30 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) {
             .inc_by(discovered_urls.len() as u64);
         if let Err(e) = ctx.nats.publish_discovered(&discovered_urls).await {
             error!("Failed to publish discovered URLs to NATS: {}", e);
+            ctx.metrics.active_tasks.dec();
+            return false;
         }
     }
 
     ctx.metrics.pages_crawled.inc();
-    ctx.metrics.bytes_downloaded.inc_by(body_bytes.len() as u64);
-    ctx.metrics.crawl_duration_ms.observe(duration_ms as f64);
+    ctx.metrics
+        .bytes_downloaded
+        .inc_by(body_bytes.len() as u64);
+    ctx.metrics
+        .crawl_duration_ms
+        .observe(duration_ms as f64);
     ctx.metrics.active_tasks.dec();
 
-    info!(url = %task.url, duration_ms = duration_ms, links = discovered_urls.len(), "Crawl task succeeded");
+    true
 }
 
 async fn record_failure(
-    ctx: &WorkerContext,
+    ctx: &Arc<WorkerContext>,
     task: &CrawlTask,
     status: CrawlStatus,
     duration_ms: u64,
-) {
+) -> bool {
     ctx.metrics.pages_failed.inc();
-
     let result = CrawlResult {
         source_url: task.url.clone(),
         job_id: task.job_id,
@@ -385,6 +420,9 @@ async fn record_failure(
     };
 
     if let Err(e) = ctx.nats.publish_result(&result).await {
-        error!("Failed to publish failure result to NATS: {}", e);
+        error!("Failed to publish failed crawl result to NATS: {}", e);
+        false
+    } else {
+        true
     }
 }

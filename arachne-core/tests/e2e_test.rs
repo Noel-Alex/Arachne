@@ -3,7 +3,7 @@ use arachne_core::{
     content::extractor,
     dedup::Deduplicator,
     domain,
-    models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl},
+    models::{CrawlJob, CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl},
     politeness::PolitenessLimiter,
 };
 use std::time::Duration;
@@ -20,21 +20,34 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     let root_domain = domain::extract_root_domain(&normalized).unwrap();
     assert_eq!(root_domain, "example.com");
 
-    // 2. Deduplication Engine
+    // 2. SSRF & Egress Boundary Test
+    assert!(domain::is_safe_egress_url("https://example.com/docs"));
+    assert!(!domain::is_safe_egress_url("http://127.0.0.1/admin"));
+    assert!(!domain::is_safe_egress_url("http://169.254.169.254/latest/meta-data/"));
+
+    // 3. Deduplication Engine
     let dedup = Deduplicator::new(10_000, 0.001);
     assert!(!dedup.probably_seen(&normalized));
     dedup.mark_seen(&normalized);
     assert!(dedup.probably_seen(&normalized));
     assert_eq!(dedup.estimated_count(), 1);
 
-    // 3. Politeness Engine & Rate Limiter
+    // 4. Politeness Engine & Rate Limiter
     let politeness = PolitenessLimiter::new(10);
     let start = std::time::Instant::now();
     politeness.wait_for_permission(&root_domain).await;
     politeness.wait_for_permission(&root_domain).await;
     assert!(start.elapsed() >= Duration::from_millis(5));
 
-    // 4. HTML Extraction & Link Parser
+    // 5. Job Crawl Policy Test
+    let mut job = CrawlJob::default();
+    job.max_depth = Some(2);
+    job.allowed_domains = Some(vec!["example.com".to_string()]);
+    assert!(job.is_url_allowed("https://example.com/docs", 1, "example.com"));
+    assert!(!job.is_url_allowed("https://other.com/about", 1, "other.com"));
+    assert!(!job.is_url_allowed("https://example.com/deep", 3, "example.com"));
+
+    // 6. HTML Extraction & Link Parser
     let html = r#"
         <!DOCTYPE html>
         <html lang="en">
@@ -58,7 +71,7 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     assert_eq!(extracted.links.len(), 2);
     assert!(extracted.links.contains(&"https://example.com/docs".to_string()));
 
-    // 5. Job & Task Data Model Consistency
+    // 7. Task & Result Models
     let job_id = Uuid::new_v4();
     let task = CrawlTask {
         url: normalized.clone(),
@@ -73,7 +86,7 @@ async fn test_e2e_pipeline_components() -> Result<()> {
         job_id: task.job_id,
         status: CrawlStatus::Success,
         domain: Some(task.domain.clone()),
-        content_ref: Some("./storage/hash.html".into()),
+        content_ref: Some("file:///storage/hash.html".into()),
         title: extracted.title,
         language: extracted.language,
         content_length: Some(html.len()),

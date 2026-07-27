@@ -15,7 +15,7 @@ const BATCH_PER_PRODUCER: usize = 5_000;
 async fn main() -> Result<()> {
     arachne_core::logging::init_logging();
     println!("===============================================================");
-    println!("🚀 ARACHNE 1,000,000 (1 MILLION) URL MULTI-PRODUCER BENCHMARK");
+    println!("🚀 ARACHNE 1,000,000 (1 MILLION) NATS TASK PUBLISH BENCHMARK");
     println!("===============================================================");
 
     let config = ArachneConfig::load(None)?;
@@ -53,18 +53,23 @@ async fn main() -> Result<()> {
                 tasks.push(task);
 
                 if tasks.len() >= BATCH_PER_PRODUCER {
-                    if let Err(e) = nats_ref.publish_tasks_bincode_batch(&tasks).await {
-                        eprintln!("Producer error: {:?}", e);
+                    match nats_ref.publish_tasks_batch(&tasks).await {
+                        Ok(_) => {
+                            counter_ref.fetch_add(tasks.len(), Ordering::Relaxed);
+                        }
+                        Err(e) => {
+                            eprintln!("Producer error: {:?}", e);
+                        }
                     }
-                    counter_ref.fetch_add(tasks.len(), Ordering::Relaxed);
                     tasks.clear();
                 }
             }
 
             if !tasks.is_empty() {
                 let count = tasks.len();
-                let _ = nats_ref.publish_tasks_bincode_batch(&tasks).await;
-                counter_ref.fetch_add(count, Ordering::Relaxed);
+                if nats_ref.publish_tasks_batch(&tasks).await.is_ok() {
+                    counter_ref.fetch_add(count, Ordering::Relaxed);
+                }
             }
         });
 
@@ -99,10 +104,10 @@ async fn main() -> Result<()> {
     let total = published_counter.load(Ordering::Relaxed);
     let final_rate = total as f64 / elapsed;
 
-    println!("\n🔥 VERIFIED E2E THROUGHPUT RESULT 🔥");
-    println!("  Total Messages: {}", total);
-    println!("  Time Taken:     {:.2} seconds", elapsed);
-    println!("  Throughput:     {:.1} msg/sec ({:.2} Million msg/min)", final_rate, (final_rate * 60.0) / 1_000_000.0);
+    println!("\n🔥 CONFIRMED ACKNOWLEDGED PUBLISH BENCHMARK RESULT 🔥");
+    println!("  Total Messages ACKed: {}", total);
+    println!("  Time Taken:           {:.2} seconds", elapsed);
+    println!("  Throughput:           {:.1} msg/sec ({:.2} Million msg/min)", final_rate, (final_rate * 60.0) / 1_000_000.0);
     println!("===============================================================");
 
     Ok(())

@@ -10,7 +10,7 @@ uri = "127.0.0.1:9042"
 keyspace = "arachne"
 
 [worker]
-max_concurrent_requests = 500
+max_concurrent_requests = 1000
 request_timeout_secs = 30
 connect_timeout_secs = 10
 max_content_size_bytes = 5242880  # 5MB
@@ -20,10 +20,10 @@ retry_attempts = 3
 retry_backoff_ms = 1000
 
 [coordinator]
-max_pages_per_domain = 1000
-batch_size = 256
+max_pages_per_domain = 10000
+batch_size = 2000
 batch_timeout_ms = 200
-dedup_bloom_capacity = 10000000
+dedup_bloom_capacity = 100000000
 dedup_bloom_fp_rate = 0.001
 
 [politeness]

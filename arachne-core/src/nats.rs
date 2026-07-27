@@ -6,6 +6,7 @@ use async_nats::jetstream::{
     consumer::{self, pull::Config as PullConfig},
     stream::{Config as StreamConfig, RetentionPolicy},
 };
+use futures::future::join_all;
 use std::time::Duration;
 use tracing::{debug, info};
 
@@ -48,6 +49,7 @@ impl NatsManager {
                 name: STREAM_CRAWL_TASKS.to_string(),
                 subjects: vec![SUBJECT_TASK.to_string()],
                 retention: RetentionPolicy::WorkQueue,
+                max_bytes: 10 * 1024 * 1024 * 1024, // 10GB buffer limit for internet-scale queues
                 ..Default::default()
             })
             .await?;
@@ -59,6 +61,7 @@ impl NatsManager {
                 subjects: vec![SUBJECT_RESULT.to_string()],
                 retention: RetentionPolicy::Limits,
                 max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
+                max_bytes: 20 * 1024 * 1024 * 1024, // 20GB limit
                 ..Default::default()
             })
             .await?;
@@ -69,6 +72,7 @@ impl NatsManager {
                 name: STREAM_DISCOVERED_URLS.to_string(),
                 subjects: vec![SUBJECT_DISCOVERED.to_string()],
                 retention: RetentionPolicy::WorkQueue,
+                max_bytes: 10 * 1024 * 1024 * 1024, // 10GB limit
                 ..Default::default()
             })
             .await?;
@@ -76,7 +80,7 @@ impl NatsManager {
         Ok(())
     }
 
-    /// Publish a crawl task.
+    /// Synchronously publish a single crawl task (awaits ACK).
     pub async fn publish_task(&self, task: &CrawlTask) -> Result<()> {
         let payload = serde_json::to_vec(task)?;
         self.jetstream
@@ -86,7 +90,26 @@ impl NatsManager {
         Ok(())
     }
 
-    /// Publish a crawl result.
+    /// High-throughput concurrent batch publish for tasks.
+    pub async fn publish_tasks_batch(&self, tasks: &[CrawlTask]) -> Result<()> {
+        let mut futures = Vec::with_capacity(tasks.len());
+        for task in tasks {
+            let payload = serde_json::to_vec(task)?;
+            let ack_fut = self.jetstream
+                .publish(SUBJECT_TASK.to_string(), payload.into())
+                .await?;
+            futures.push(async move { ack_fut.await });
+        }
+
+        // Wait for all ACKs concurrently over TCP stream
+        let results = join_all(futures).await;
+        for res in results {
+            res?;
+        }
+        Ok(())
+    }
+
+    /// Synchronously publish a crawl result.
     pub async fn publish_result(&self, result: &CrawlResult) -> Result<()> {
         let payload = serde_json::to_vec(result)?;
         self.jetstream
@@ -96,7 +119,25 @@ impl NatsManager {
         Ok(())
     }
 
-    /// Publish discovered URLs.
+    /// High-throughput concurrent batch publish for results.
+    pub async fn publish_results_batch(&self, results: &[CrawlResult]) -> Result<()> {
+        let mut futures = Vec::with_capacity(results.len());
+        for result in results {
+            let payload = serde_json::to_vec(result)?;
+            let ack_fut = self.jetstream
+                .publish(SUBJECT_RESULT.to_string(), payload.into())
+                .await?;
+            futures.push(async move { ack_fut.await });
+        }
+
+        let acks = join_all(futures).await;
+        for ack in acks {
+            ack?;
+        }
+        Ok(())
+    }
+
+    /// Synchronously publish discovered URLs.
     pub async fn publish_discovered(&self, urls: &[DiscoveredUrl]) -> Result<()> {
         let payload = serde_json::to_vec(urls)?;
         self.jetstream
@@ -114,6 +155,7 @@ impl NatsManager {
                 worker_name,
                 PullConfig {
                     durable_name: Some(worker_name.to_string()),
+                    max_deliver: 3,
                     ..Default::default()
                 },
             )
@@ -129,6 +171,7 @@ impl NatsManager {
                 "coordinator_results",
                 PullConfig {
                     durable_name: Some("coordinator_results".to_string()),
+                    max_deliver: 3,
                     ..Default::default()
                 },
             )
@@ -144,6 +187,7 @@ impl NatsManager {
                 "coordinator_discovered",
                 PullConfig {
                     durable_name: Some("coordinator_discovered".to_string()),
+                    max_deliver: 3,
                     ..Default::default()
                 },
             )

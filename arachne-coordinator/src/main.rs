@@ -252,6 +252,9 @@ async fn process_discovered_urls(
                             }
                         };
 
+                        let mut tasks_to_publish = Vec::new();
+                        let mut msgs_to_ack = Vec::new();
+
                         for (idx, (root_domain, candidate)) in filtered_candidates.into_iter().enumerate() {
                             let msg = candidate_msgs[idx];
 
@@ -297,11 +300,18 @@ async fn process_discovered_urls(
                                 priority: 1,
                             };
 
-                            if let Err(e) = nats.publish_task(&task).await {
-                                error!("Failed to dispatch task to NATS: {:?}", e);
-                            }
+                            tasks_to_publish.push(task);
+                            msgs_to_ack.push(msg);
+                        }
 
-                            let _ = msg.ack().await;
+                        if !tasks_to_publish.is_empty() {
+                            if let Err(e) = nats.publish_tasks_batch(&tasks_to_publish).await {
+                                error!("Failed to batch dispatch tasks to NATS: {:?}", e);
+                            } else {
+                                for msg in msgs_to_ack {
+                                    let _ = msg.ack().await;
+                                }
+                            }
                         }
                     }
                     Err(e) => {

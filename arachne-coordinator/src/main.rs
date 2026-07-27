@@ -25,7 +25,7 @@ async fn main() -> Result<()> {
 
     let metrics = Arc::new(CrawlerMetrics::new());
     let metrics_clone = Arc::clone(&metrics);
-    let metrics_port = config.metrics.port;
+    let metrics_port = config.metrics.port + 1;
     tokio::spawn(async move {
         info!("Starting metrics server on port {}", metrics_port);
         if let Err(e) = arachne_core::metrics::serve_metrics(metrics_clone, metrics_port).await {

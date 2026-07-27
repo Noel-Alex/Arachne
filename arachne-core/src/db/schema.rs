@@ -8,7 +8,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
     // Keyspace
     session
         .query(
-            "CREATE KEYSPACE IF NOT EXISTS arachne WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 }",
+            "CREATE KEYSPACE IF NOT EXISTS arachne WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 } AND TABLETS = { 'enabled' : false }",
             &[],
         )
         .await?;
@@ -21,8 +21,8 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 name text,
                 status text,
                 config text,
-                created_at timestamp,
-                updated_at timestamp
+                created_at bigint,
+                updated_at bigint
             )",
             &[],
         )
@@ -42,7 +42,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 title text,
                 language text,
                 content_ref text,
-                crawled_at timestamp,
+                crawled_at bigint,
                 crawl_duration_ms int,
                 PRIMARY KEY ((domain), url)
             )",
@@ -56,9 +56,9 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
             "CREATE TABLE IF NOT EXISTS arachne.domain_metadata (
                 domain text PRIMARY KEY,
                 robots_txt text,
-                robots_fetched_at timestamp,
+                robots_fetched_at bigint,
                 crawl_delay_ms int,
-                last_crawled_at timestamp
+                last_crawled_at bigint
             )",
             &[],
         )

@@ -3,7 +3,7 @@
 # e.g., ARACHNE_NATS__URL=nats://remote:4222
 
 [nats]
-url = "nats://127.0.0.1:4222"
+url = "nats://127.0.0.1:4223"
 
 [scylla]
 uri = "127.0.0.1:9042"

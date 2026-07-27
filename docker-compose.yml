@@ -20,11 +20,9 @@ services:
       - "--store_dir=/data"
       - "-m"
       - "8222"
-      - "--max_payload"
-      - "8388608"
     ports:
-      - "4222:4222"   # Client connections
-      - "8222:8222"   # HTTP monitoring + Prometheus metrics
+      - "4223:4222"   # Client connections
+      - "8223:8222"   # HTTP monitoring + Prometheus metrics
     volumes:
       - nats_data:/data
     restart: unless-stopped

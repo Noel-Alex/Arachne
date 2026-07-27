@@ -4,6 +4,7 @@ members = [
     "arachne-worker",
     "arachne-coordinator",
     "arachne-cli",
+    "arachne-tools",
 ]
 resolver = "2"
 

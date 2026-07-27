@@ -1,0 +1,14 @@
+[
+  {
+    "domain": "wikipedia.org",
+    "url": "https://wikipedia.org",
+    "job_id": "b6632f53-f793-41d4-a15b-a324159d3767",
+    "http_status": 0,
+    "content_length": 120361,
+    "content_hash": "a9575d30da0900fd8bf397c853dac1b2d9826a81ea27145887d3fa2fb4d7de96",
+    "title": "Wikipedia",
+    "language": "en",
+    "content_ref": "./crawled_data\\wikipedia.org\\a9575d30da0900fd8bf397c853dac1b2d9826a81ea27145887d3fa2fb4d7de96.html",
+    "crawled_at": "2026-07-27T12:53:49.716Z"
+  }
+]

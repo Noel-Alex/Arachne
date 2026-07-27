@@ -188,6 +188,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "arachne-tools"
+version = "2.0.0"
+dependencies = [
+ "anyhow",
+ "arachne-core",
+ "async-nats 0.40.0",
+ "chrono",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+]
+
+[[package]]
 name = "arachne-worker"
 version = "2.0.0"
 dependencies = [

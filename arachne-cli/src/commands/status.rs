@@ -1,7 +1,6 @@
 use anyhow::Result;
 use arachne_core::config::ArachneConfig;
 use arachne_core::db::ArachneRepo;
-use tracing::info;
 
 /// Display status of crawl jobs.
 pub async fn run(config: ArachneConfig, job_id: Option<String>) -> Result<()> {

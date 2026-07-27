@@ -1,82 +1,135 @@
-# Arachne: The Seeker
+# Arachne v2: The Seeker
 
-A distributed, high-performance web crawler designed for resilience, throughput, and the relentless pursuit of knowledge.
+A production-grade, high-performance distributed web crawling toolkit built in Rust and powered by NATS JetStream and ScyllaDB.
 
 ---
 
-## 1. Overview
+## Overview
 
-Arachne is the foundational data-gathering component of the **Logos Search Engine** ecosystem. Its sole purpose is to explore the vastness of the internet with extreme efficiency, discovering and fetching content to feed the downstream indexing and query systems. It is designed from the ground up to be horizontally scalable, fault-tolerant, and capable of sustaining a high-volume, respectful crawl.
+Arachne is an extensible, modular web crawler designed for high-throughput topic-driven ingestion, site-scoped crawling, rate-limited politeness compliance, and full pipeline observability.
 
-This system is not just a tool; it is **The Seeker**—the first, essential step in the journey to transform the chaotic web into structured, accessible knowledge.
+Key design highlights in v2:
+- **Pure Rust Stack**: Eliminates C dependencies (moved from Redpanda/Kafka `rdkafka` to NATS JetStream `async-nats`).
+- **Decoupled Architecture**: Modular workspace with `arachne-core`, `arachne-worker`, `arachne-coordinator`, and `arachne-cli`.
+- **Ethical Politeness Engine**: `robots.txt` caching (`texting_robots`), adaptive per-domain rate limiting (`governor`).
+- **Smart Deduplication**: In-memory Bloom filters combined with ScyllaDB batch checks to eliminate redundant work.
+- **Rich CLI & Configuration**: Layered TOML + Environment + CLI options for job control, page limits, depth limits, and topic-focused crawling.
 
-## 2. Core Philosophy & Design
+---
 
-The architecture of Arachne is guided by three core principles:
+## Architecture
 
-*   **Extreme Performance:** Every component is written in **Rust** to guarantee memory safety, fearless concurrency, and bare-metal performance. This is complemented by the use of ScyllaDB and Apache Kafka, technologies renowned for their low-latency and high-throughput capabilities.
-*   **Decoupled Scalability:** The system is architected around a message queue, completely decoupling the coordination logic from the fleet of crawling workers. This allows for effortless horizontal scaling—simply add more worker instances to increase crawl throughput.
-*   **Resilience and Durability:** By using Kafka as a central bus and ScyllaDB for state persistence, the system can withstand worker or node failures without losing data or crawl progress. Tasks are durable and processing can be resumed by any available worker.
+```
+                       +-------------------+
+                       |    arachne CLI    |
+                       +---------+---------+
+                                 |
+                                 v
+                       +-------------------+
+                       | NATS JetStream    |
+                       | (CRAWL_TASKS)     |
+                       +---------+---------+
+                                 |
+           +---------------------+---------------------+
+           |                     |                     |
+           v                     v                     v
+  +-----------------+   +-----------------+   +-----------------+
+  | arachne-worker  |   | arachne-worker  |   | arachne-worker  |
+  +--------+--------+   +--------+--------+   +--------+--------+
+           |                     |                     |
+           +---------------------+---------------------+
+                                 |
+                   (CRAWL_RESULTS / DISCOVERED_URLS)
+                                 v
+                       +-------------------+
+                       |arachne-coordinator|
+                       +---------+---------+
+                                 |
+                        +--------+--------+
+                        |                 |
+                        v                 v
+                   +----------+     +------------+
+                   | ScyllaDB |     | FS / S3    |
+                   +----------+     +------------+
+```
 
-## 3. System Architecture
+---
 
-Arachne consists of four primary components that work in concert:
+## Workspace Structure
 
-![img.png](img.png)
+- `arachne-core`: Shared types, domain logic, NATS client, Scylla repository, politeness engine, content extraction, metrics, and configuration.
+- `arachne-worker`: Stateless worker nodes that fetch pages, respect politeness, extract links/metadata, save content, and publish results.
+- `arachne-coordinator`: Coordinates crawl jobs, enforces page/domain limits, performs bloom filter + DB deduplication, and queues new tasks.
+- `arachne-cli`: Command-line tool (`arachne`) for seeding, starting jobs, inspecting status, exporting data, and checking domain metadata.
 
-1.  **Coordinator Node:** The brain of the operation. It manages the master state of the crawl.
-    *   **URL Frontier:** Prioritizes which URLs should be crawled next.
-    *   **Seen Set:** A high-performance lookup table to prevent re-crawling the same content.
-    *   **Politeness Manager:** Enforces `robots.txt` rules and rate limits to ensure Arachne is a good citizen of the web.
-    *   **Coordinator Logic:** Dispatches URLs to the `url-to-crawl` topic.
+---
 
-2.  **Message Queue (The Current):** Powered by **Apache Kafka**, this acts as the central nervous system.
-    *   `url-to-crawl` topic: The Coordinator places URLs here for the workers to consume.
-    *   `crawl-results` topic: Workers publish the outcome of their fetching tasks here, which are then consumed by the Logos indexing pipeline.
+## Quick Start
 
-3.  **Worker Fleet (Fleet):** A scalable fleet of stateless workers that perform the actual crawling.
-    *   Each worker consumes a URL from the queue, fetches the content from the internet, performs preliminary parsing, and returns the content.
-    *   Results (content location and metadata) are published back to the `crawl-results` topic.
+### 1. Infrastructure Setup
+Start NATS JetStream, ScyllaDB, Prometheus, Loki, Promtail, and Grafana:
 
-4.  **Data Persistence (The Chronicle):**
-    *   **Metadata Database (ScyllaDB):** Stores page metadata, link graphs, crawl timestamps, and other essential information needed for coordination and ranking. Chosen for its extreme low-latency read/write performance at scale.
-    *   **Content Storage (AWS S3 / Object Store):** Raw fetched content (HTML, PDFs, media) is stored in a durable, cost-effective object store.
-    *   **Crawl State (Redis / ScyllaDB):** Caches and ephemeral state for the Seen Set and Frontier for maximum performance.
+```bash
+docker-compose up -d
+```
 
-## 4. Technology Stack
+### 2. Build binaries
+```bash
+cargo build --release
+```
 
-*   **Core Language:** [**Rust**](https://www.rust-lang.org/) (for its performance, safety, and concurrency)
-*   **Message Broker:** [**Apache Kafka**](https://kafka.apache.org/) (for durable, high-throughput messaging)
-*   **Metadata Store:** [**ScyllaDB**](https://www.scylladb.com/) (for its masterclass performance as a NoSQL database)
-*   **Content Store:** [**AWS S3**](https://aws.amazon.com/s3/) (or any S3-compatible object store)
-*   **Deployment:** [**Docker**](https://www.docker.com/) & [**Docker Compose**](https://docs.docker.com/compose/) (for easy, reproducible deployments)
+### 3. Start Coordinator and Workers
+```bash
+./target/release/arachne-coordinator &
+./target/release/arachne-worker &
+```
 
-## 5. Getting Started
+### 4. CLI Usage
 
-The entire Arachne stack is containerized for simple, one-command initialization.
+#### Seed URLs directly or from a file
+```bash
+# Seed individual URLs
+./target/release/arachne seed --urls https://news.ycombinator.com https://en.wikipedia.org
 
-1.  **Clone the repository:**
-    ```bash
-    git clone https://github.com/Noel-Alex/Logos.git
-    cd Logos
-    cd Arachne
-    ```
+# Seed from a file or stdin
+./target/release/arachne seed --file urls.txt
+cat urls.txt | ./target/release/arachne seed --stdin
+```
 
-2.  **Initialize the infrastructure:**
-    This command will start Kafka and ScyllaDB services in the background.
-    ```bash
-    docker-compose up
-    ```
+#### Start a Crawl Job with Limits & Filters
+```bash
+./target/release/arachne crawl \
+  --seeds "https://news.ycombinator.com" \
+  --max-pages 5000 \
+  --max-pages-per-domain 500 \
+  --max-depth 3 \
+  --allowed-domains "news.ycombinator.com,ycombinator.com" \
+  --topic "rust,systems,compiler" \
+  --max-content-size 2MB \
+  --name "hn-rust-crawl"
+```
 
-3.  **Build and run the Rust components:**
-    (Build instructions for the Coordinator and Worker binaries will go here).
-    ```bash
-    # Example
-    cargo build --release
-    ./target/release/coordinator &
-    ./target/release/worker &
-    ```
+#### Check Job Status & Inspect Domains
+```bash
+# List all jobs
+./target/release/arachne status
 
-## 6. License
+# Inspect specific job
+./target/release/arachne status --job-id <UUID>
 
-This project is licensed under the [MIT License](LICENSE).
+# Inspect domain metadata (robots.txt, crawl delays)
+./target/release/arachne inspect ycombinator.com
+```
+
+---
+
+## Metrics & Observability
+
+- **Metrics endpoints**: Worker (`:9191/metrics`), Coordinator (`:9192/metrics`), NATS (`:8222/metrics`)
+- **Grafana Dashboards**: Default dashboard provisioning set up at `http://localhost:3000` (User: `admin`, Password: `admin`)
+
+---
+
+## License
+
+Licensed under the MIT License.

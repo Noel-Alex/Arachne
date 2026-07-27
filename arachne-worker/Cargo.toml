@@ -1,0 +1,31 @@
+[package]
+name = "arachne-worker"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Worker node for the Arachne distributed web crawler"
+
+[[bin]]
+name = "arachne-worker"
+path = "src/main.rs"
+
+[dependencies]
+arachne-core = { path = "../arachne-core" }
+tokio = { workspace = true }
+async-nats = { workspace = true }
+reqwest = { workspace = true }
+scraper = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+url = { workspace = true }
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+futures = { workspace = true }
+chrono = { workspace = true }
+bytes = { workspace = true }
+encoding_rs = { workspace = true }
+uuid = { workspace = true }
+sha2 = { workspace = true }
+hex = { workspace = true }

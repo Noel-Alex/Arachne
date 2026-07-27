@@ -1,28 +1,50 @@
-version: '3.8'
-
 networks:
-  monitoring-net:
+  arachne-net:
     driver: bridge
 
 volumes:
-  redpanda_data:
+  nats_data:
     driver: local
   scylla_data:
     driver: local
+  grafana_data:
+    driver: local
 
 services:
-  # --- DATA STORE STACK ---
+  # --- MESSAGING (NATS JetStream) ---
+  nats:
+    image: nats:latest
+    container_name: arachne-nats
+    command:
+      - "--jetstream"
+      - "--store_dir=/data"
+      - "-m"
+      - "8222"
+      - "--max_payload"
+      - "8388608"
+    ports:
+      - "4222:4222"   # Client connections
+      - "8222:8222"   # HTTP monitoring + Prometheus metrics
+    volumes:
+      - nats_data:/data
+    restart: unless-stopped
+    networks:
+      - arachne-net
+
+  # --- DATA STORE (ScyllaDB) ---
   scylla:
     image: scylladb/scylla:latest
-    container_name: scylla
+    container_name: arachne-scylla
     ports:
-      - "9042:9042" # Native CQL
+      - "9042:9042"   # CQL native protocol
+      - "9180:9180"   # Prometheus metrics
     volumes:
       - scylla_data:/var/lib/scylla
     command:
-      - --smp=1
+      - --smp=2
       - --developer-mode=1
       - --memory=4G
+      - --cluster-name=arachne-cluster
     healthcheck:
       test: ["CMD-SHELL", "nodetool status | grep '^UN'"]
       interval: 15s
@@ -30,149 +52,64 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - monitoring-net
-
-  # --- STREAMING STACK (REDPANDA) ---
-  redpanda:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
-    container_name: redpanda
-    command:
-      - redpanda start
-      - --smp 4  # Use 1 CPU core
-      - --memory 2G # Explicit RAM limit
-      - --reserve-memory 0M
-      - --overprovisioned
-      - --node-id 0
-      - --check=false
-      - --advertise-kafka-addr PLAIN://redpanda:9092,OUTSIDE://localhost:9093
-      - --pandaproxy-addr 0.0.0.0:8082
-      - --kafka-addr PLAIN://0.0.0.0:9092,OUTSIDE://0.0.0.0:9093
-      - --rpc-addr 0.0.0.0:33145
-      # Increase max request size to 20MB globally
-      - --set redpanda.kafka_batch_max_bytes=209715200
-      - --set redpanda.kafka_max_message_bytes=209715200
-      - --set max.poll.interval.ms=18000000
-    ports:
-      - "9092:9092"
-      - "9093:9093"
-      - "8081:8081" # Schema Registry
-      - "8082:8082" # HTTP Proxy
-      - "9644:9644" # Admin + PROMETHEUS METRICS
-    volumes:
-      - redpanda_data:/var/lib/redpanda/data
-    networks:
-      - monitoring-net
-
-  # --- INIT JOB (FIXED SYNTAX) ---
-  redpanda-init:
-    image: docker.redpanda.com/redpandadata/redpanda:latest
-    container_name: redpanda-init
-    depends_on:
-      - redpanda
-    entrypoint: /bin/sh
-    command:
-      - -c
-      - |
-        echo 'Waiting for Redpanda Admin API...'
-        while ! rpk cluster health -X admin.hosts=redpanda:9644; do sleep 2; done
-        
-        echo 'Redpanda is up! Creating topics...'
-        
-
-        rpk topic create urls-to-crawl -p 160 -r 1 \
-          -c retention.ms=604800000 \
-          -c segment.bytes=67108864 \
-          -X brokers=redpanda:9092
-        
-        # TOPIC: crawl-results
-        rpk topic create crawl-results -p 16 -r 1 \
-          -c max.message.bytes=209715200 \
-          -c retention.ms=604800000 \
-          -X brokers=redpanda:9092
-        
-        echo 'Topics created with Aggressive Retention policies.'
-    networks:
-      - monitoring-net
-
-  kafka-ui:
-    image: provectuslabs/kafka-ui:latest
-    container_name: kafka-ui
-    ports:
-      - "8080:8080"
-    depends_on:
-      - redpanda
-    environment:
-      KAFKA_CLUSTERS_0_NAME: redpanda-cluster
-      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: redpanda:9092
-      DYNAMIC_CONFIG_ENABLED: 'true'
-    networks:
-      - monitoring-net
+      - arachne-net
 
   # --- MONITORING STACK ---
   prometheus:
     image: prom/prometheus:latest
-    container_name: prometheus
+    container_name: arachne-prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=7d'
     ports:
-      - 9090:9090
+      - "9090:9090"
     volumes:
-      - ./monitoring-configs/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - ./deploy/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
     networks:
-      - monitoring-net
+      - arachne-net
     depends_on:
-      - redpanda
+      - nats
       - scylla
-
-  alertmanager:
-    image: prom/alertmanager:latest
-    container_name: alertmanager
-    ports:
-      - 9095:9095
-    volumes:
-      - ./monitoring-configs/alertmanager/config.yml:/etc/alertmanager/config.yml
-    networks:
-      - monitoring-net
 
   loki:
     image: grafana/loki:latest
-    container_name: loki
+    container_name: arachne-loki
     command: -config.file=/etc/loki/loki-config.yaml
     ports:
-      - 3100:3100
+      - "3100:3100"
     volumes:
-      - ./monitoring-configs/loki/loki-config.yaml:/etc/loki/loki-config.yaml
+      - ./deploy/monitoring/loki/loki-config.yaml:/etc/loki/loki-config.yaml
     networks:
-      - monitoring-net
+      - arachne-net
 
   promtail:
     image: grafana/promtail:latest
-    container_name: promtail
+    container_name: arachne-promtail
     command: -config.file=/etc/promtail/promtail-config.yml
     volumes:
-      - ./monitoring-configs/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml
+      - ./deploy/monitoring/promtail/promtail-config.yml:/etc/promtail/promtail-config.yml
       - /var/log:/var/log
       - /var/lib/docker/containers:/var/lib/docker/containers:ro
     networks:
-      - monitoring-net
+      - arachne-net
     depends_on:
       - loki
 
   grafana:
     image: grafana/grafana:latest
-    container_name: grafana
+    container_name: arachne-grafana
     user: "472"
     ports:
-      - 3000:3000
+      - "3000:3000"
     volumes:
-      - ./monitoring-configs/grafana/provisioning:/etc/grafana/provisioning
+      - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - grafana_data:/var/lib/grafana
     environment:
       - GF_SECURITY_ADMIN_USER=admin
-      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
       - GF_PANELS_DISABLE_SANITIZE_HTML=true
-      - GF_PLUGINS_ALLOW_LOADING_UNSIGNED_PLUGINS=scylladb-scylla-datasource
     networks:
-      - monitoring-net
+      - arachne-net
     depends_on:
       - prometheus
       - loki

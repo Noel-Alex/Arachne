@@ -1,0 +1,43 @@
+# Arachne Configuration
+# All values can be overridden via environment variables prefixed with ARACHNE_
+# e.g., ARACHNE_NATS__URL=nats://remote:4222
+
+[nats]
+url = "nats://127.0.0.1:4222"
+
+[scylla]
+uri = "127.0.0.1:9042"
+keyspace = "arachne"
+
+[worker]
+max_concurrent_requests = 500
+request_timeout_secs = 30
+connect_timeout_secs = 10
+max_content_size_bytes = 5242880  # 5MB
+max_redirects = 10
+user_agent = "ArachneBot/2.0 (+https://github.com/Noel-Alex/Arachne)"
+retry_attempts = 3
+retry_backoff_ms = 1000
+
+[coordinator]
+max_pages_per_domain = 1000
+batch_size = 256
+batch_timeout_ms = 200
+dedup_bloom_capacity = 10000000
+dedup_bloom_fp_rate = 0.001
+
+[politeness]
+default_crawl_delay_ms = 1000
+max_crawl_delay_ms = 30000
+robots_cache_ttl_secs = 86400
+respect_robots_txt = true
+adaptive_throttling = true
+
+[storage]
+content_dir = "./crawled_data"
+store_raw_html = true
+store_extracted_text = true
+
+[metrics]
+enabled = true
+port = 9191

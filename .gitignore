@@ -1,6 +1,7 @@
-/target
-/Arachne/target
-/.idea
-.env
-Arachne/.env
+target/
 *.exe
+.env
+crawled_data/
+urlscan_batches/
+*.parquet
+Cargo.lock

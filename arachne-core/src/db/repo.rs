@@ -2,7 +2,7 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use futures::stream::{StreamExt, FuturesUnordered};
+use futures::stream::{FuturesUnordered, StreamExt};
 use scylla::{prepared_statement::PreparedStatement, Session, SessionBuilder};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
@@ -20,6 +20,20 @@ pub struct DomainMetadata {
     pub last_crawled_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CrawledPageRecord {
+    pub domain: String,
+    pub url: String,
+    pub job_id: Uuid,
+    pub http_status: i32,
+    pub content_length: Option<i32>,
+    pub content_hash: Option<String>,
+    pub title: Option<String>,
+    pub language: Option<String>,
+    pub content_ref: Option<String>,
+    pub crawled_at: Option<DateTime<Utc>>,
+}
+
 /// Arachne Repository for ScyllaDB access.
 pub struct ArachneRepo {
     session: Session,
@@ -31,6 +45,7 @@ pub struct ArachneRepo {
     list_jobs_stmt: PreparedStatement,
     save_domain_metadata_stmt: PreparedStatement,
     get_domain_metadata_stmt: PreparedStatement,
+    get_pages_by_domain_stmt: PreparedStatement,
 }
 
 impl ArachneRepo {
@@ -78,6 +93,10 @@ impl ArachneRepo {
             .prepare("SELECT domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at FROM domain_metadata WHERE domain = ?")
             .await?;
 
+        let get_pages_by_domain_stmt = session
+            .prepare("SELECT domain, url, job_id, http_status, content_length, content_hash, title, language, content_ref, crawled_at FROM crawled_pages WHERE domain = ?")
+            .await?;
+
         Ok(Self {
             session,
             insert_crawl_result_stmt,
@@ -88,6 +107,7 @@ impl ArachneRepo {
             list_jobs_stmt,
             save_domain_metadata_stmt,
             get_domain_metadata_stmt,
+            get_pages_by_domain_stmt,
         })
     }
 
@@ -201,5 +221,38 @@ impl ArachneRepo {
         } else {
             Ok(None)
         }
+    }
+
+    pub async fn get_pages_by_domain(&self, domain: &str) -> Result<Vec<CrawledPageRecord>> {
+        let mut records = Vec::new();
+        let rows = self.session.execute(&self.get_pages_by_domain_stmt, (domain,)).await?.rows_or_empty();
+        for row in rows {
+            let (d, u, j, s, l, h, t, lang, r, c_ts): (
+                String,
+                String,
+                Uuid,
+                i32,
+                Option<i32>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i64>,
+            ) = row.into_typed()?;
+
+            records.push(CrawledPageRecord {
+                domain: d,
+                url: u,
+                job_id: j,
+                http_status: s,
+                content_length: l,
+                content_hash: h,
+                title: t,
+                language: lang,
+                content_ref: r,
+                crawled_at: c_ts.map(|ts| DateTime::from_timestamp_millis(ts).unwrap()),
+            });
+        }
+        Ok(records)
     }
 }

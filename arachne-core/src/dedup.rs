@@ -1,11 +1,13 @@
 //! URL deduplication using Bloom filter.
 
 use bloomfilter::Bloom;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::RwLock;
 
 /// Fast, memory-efficient deduplication of URLs.
 pub struct Deduplicator {
     bloom: RwLock<Bloom<String>>,
+    count: AtomicU64,
 }
 
 impl Deduplicator {
@@ -14,6 +16,7 @@ impl Deduplicator {
         let bloom = Bloom::new_for_fp_rate(capacity as usize, fp_rate);
         Self {
             bloom: RwLock::new(bloom),
+            count: AtomicU64::new(0),
         }
     }
 
@@ -27,6 +30,7 @@ impl Deduplicator {
     pub fn mark_seen(&self, url: &str) {
         let mut guard = self.bloom.write().unwrap();
         guard.set(&url.to_string());
+        self.count.fetch_add(1, Ordering::Relaxed);
     }
 
     /// Mark multiple URLs as seen.
@@ -35,11 +39,11 @@ impl Deduplicator {
         for url in urls {
             guard.set(url);
         }
+        self.count.fetch_add(urls.len() as u64, Ordering::Relaxed);
     }
 
-    /// Provide a very rough estimate of the number of unique items added.
-    /// Note: `bloomfilter` crate doesn't provide a direct way to get count, so this might return 0.
+    /// Return the number of unique items added.
     pub fn estimated_count(&self) -> u64 {
-        0 
+        self.count.load(Ordering::Relaxed)
     }
 }

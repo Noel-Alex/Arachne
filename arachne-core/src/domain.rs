@@ -1,6 +1,3 @@
-//! Domain extraction and normalization.
-
-use psl::{List, Psl};
 use url::{Host, Url};
 
 /// Extract the root domain (e.g. example.com) from a URL string, using the public suffix list.

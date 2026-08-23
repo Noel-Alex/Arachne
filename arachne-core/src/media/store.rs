@@ -88,6 +88,28 @@ impl MediaStore {
         }
     }
 
+    /// Resolve an already-stored object to its paths (dedup case): returns
+    /// `Some` with the canonical object/fs paths when the content exists,
+    /// `None` otherwise.
+    pub async fn lookup(&self, media: &MediaObject) -> Result<Option<StoredMedia>> {
+        let path = media.object_path();
+        match self.inner.head(&path).await {
+            Ok(_) => {
+                let fs_path = if self.is_local {
+                    Some(local_path_for(&self.root_url, path.as_ref()))
+                } else {
+                    None
+                };
+                Ok(Some(StoredMedia {
+                    object_path: path.to_string(),
+                    fs_path,
+                }))
+            }
+            Err(object_store::Error::NotFound { .. }) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
+    }
+
     /// Store bytes content-addressed. Idempotent: re-storing identical
     /// content is a no-op overwrite of the same key.
     pub async fn put(&self, media: &MediaObject, data: Bytes) -> Result<StoredMedia> {

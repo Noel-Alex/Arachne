@@ -440,6 +440,40 @@ async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
 
     let outcome = harvest_audio(&ctx.media, &ctx.http_client, &task).await;
 
+    // Classify for metrics + always log the terminal state (a silent
+    // download is indistinguishable from a hung one when watching logs).
+    match &outcome.status {
+        CrawlStatus::Success => {
+            ctx.metrics.audio_harvested.inc();
+            ctx.metrics.bytes_downloaded.inc_by(outcome.bytes);
+            info!(
+                url = %task.url,
+                bytes = outcome.bytes,
+                duration_s = outcome.probe.as_ref().map(|p| p.duration_secs).unwrap_or(0.0),
+                elapsed_ms = start_time.elapsed().as_millis() as u64,
+                "audio harvested"
+            );
+        }
+        CrawlStatus::ProbeFailed | CrawlStatus::QualityRejected => {
+            ctx.metrics.audio_rejected.inc();
+            warn!(
+                url = %task.url,
+                status = ?outcome.status,
+                error = outcome.error.as_deref().unwrap_or(""),
+                "audio rejected"
+            );
+        }
+        _ => {
+            ctx.metrics.audio_failed.inc();
+            warn!(
+                url = %task.url,
+                status = ?outcome.status,
+                error = outcome.error.as_deref().unwrap_or(""),
+                "audio download failed"
+            );
+        }
+    }
+
     let result = CrawlResult {
         source_url: task.url.clone(),
         job_id: task.job_id,

@@ -82,8 +82,13 @@ fn tag_string(tag: Option<&lofty::tag::Tag>, key: &ItemKey) -> Option<String> {
 }
 
 /// Probe an audio file's properties. Fails if the file is not decodable audio.
+///
+/// Uses content sniffing (`read_from` + `guess_file_type`), NOT the file
+/// extension — staging files are `.part`, and extensions lie anyway.
 pub fn probe_audio(path: &Path) -> Result<ProbeResult> {
-    let tagged = lofty::read_from_path(path).context("lofty could not parse file as audio")?;
+    let mut file = std::fs::File::open(path).context("failed to open file for probing")?;
+    let tagged =
+        lofty::read_from(&mut file).context("lofty could not parse file as audio")?;
     let props = tagged.properties();
 
     // Prefer the format's primary tag; fall back to whatever tag exists.

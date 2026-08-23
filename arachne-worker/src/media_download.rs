@@ -92,6 +92,7 @@ impl MediaContext {
     }
 }
 
+#[derive(Debug)]
 pub struct DownloadOutcome {
     pub status: CrawlStatus,
     pub stored: Option<StoredMedia>,
@@ -233,7 +234,18 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     if let Some(kind) = infer::get(&head) {
         let ext_ok = matches!(
             kind.mime_type(),
-            "audio/mpeg" | "audio/flac" | "audio/x-flac" | "audio/ogg" | "audio/wav" | "audio/x-m4a" | "video/mp4"
+            "audio/mpeg"
+                | "audio/flac"
+                | "audio/x-flac"
+                | "audio/ogg"
+                | "application/ogg"
+                | "audio/wav"
+                | "audio/x-wav"
+                | "audio/vnd.wave"
+                | "audio/x-m4a"
+                | "video/mp4"
+                | "audio/aac"
+                | "audio/x-opus"
         );
         if !ext_ok {
             quarantine(&ctx.config, &part_path, "wrong-magic-bytes").await;
@@ -300,18 +312,19 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         extension: extension.clone(),
     };
 
-    // Skip commit if identical content already stored.
-    let stored = if ctx.store.exists(&obj).await? {
-        cleanup(&part_path).await;
-        StoredMedia {
-            object_path: format!("already-present:{}", obj.sha256),
-            fs_path: None,
+    // Commit content-addressed; if identical content already exists, resolve
+    // its canonical paths so the manifest still points at a real file.
+    let stored = match ctx.store.lookup(&obj).await? {
+        Some(existing) => {
+            cleanup(&part_path).await;
+            existing
         }
-    } else {
-        let data = tokio::fs::read(&part_path).await?;
-        let stored = ctx.store.put(&obj, data.into()).await?;
-        cleanup(&part_path).await;
-        stored
+        None => {
+            let data = tokio::fs::read(&part_path).await?;
+            let stored = ctx.store.put(&obj, data.into()).await?;
+            cleanup(&part_path).await;
+            stored
+        }
     };
 
     let mut total = ctx.total_bytes.lock().await;
@@ -357,9 +370,10 @@ fn extension_for(task: &CrawlTask, head: &[u8]) -> String {
         return match kind.mime_type() {
             "audio/mpeg" => "mp3".into(),
             "audio/flac" | "audio/x-flac" => "flac".into(),
-            "audio/ogg" => "ogg".into(),
-            "audio/wav" => "wav".into(),
+            "audio/ogg" | "application/ogg" | "audio/x-opus" => "ogg".into(),
+            "audio/wav" | "audio/x-wav" | "audio/vnd.wave" => "wav".into(),
             "audio/x-m4a" | "video/mp4" => "m4a".into(),
+            "audio/aac" => "aac".into(),
             _ => kind.extension().to_string(),
         };
     }
@@ -411,5 +425,163 @@ async fn cleanup(part_path: &std::path::Path) {
         && e.kind() != std::io::ErrorKind::NotFound
     {
         warn!("failed removing .part {}: {e}", part_path.display());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arachne_core::models::{CrawlTask, MediaMeta, TaskKind};
+    use tokio::io::AsyncReadExt;
+
+    /// Generate a valid 16-bit PCM mono WAV of ~35s at 8kHz (128 kbps).
+    fn wav_bytes(duration_secs: usize) -> Vec<u8> {
+        let sample_rate: u32 = 8000;
+        let data_len = (sample_rate as usize * duration_secs) * 2;
+        let mut b = Vec::with_capacity(44 + data_len);
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len as u32).to_le_bytes());
+        b.extend_from_slice(b"WAVE");
+        b.extend_from_slice(b"fmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&sample_rate.to_le_bytes());
+        b.extend_from_slice(&(sample_rate * 2).to_le_bytes()); // byte rate
+        b.extend_from_slice(&2u16.to_le_bytes()); // block align
+        b.extend_from_slice(&16u16.to_le_bytes()); // bits
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&(data_len as u32).to_le_bytes());
+        // Low-amplitude sine-ish pattern so decoders stay happy.
+        for i in 0..data_len / 2 {
+            let v = ((i as f64 * 0.01).sin() * 3000.0) as i16;
+            b.extend_from_slice(&v.to_le_bytes());
+        }
+        b
+    }
+
+    /// Serve `body` once on an ephemeral port; returns the URL + join handle.
+    /// Fully async — safe under the single-threaded #[tokio::test] runtime.
+    async fn spawn_one_shot_server(body: Vec<u8>) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let handle = tokio::task::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                // Drain request head (headers end at CRLFCRLF).
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 || String::from_utf8_lossy(&buf[..n]).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&body).await;
+                let _ = sock.flush().await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://{addr}/test.wav"), handle)
+    }
+
+    async fn test_context(store_dir: &std::path::Path) -> Arc<MediaContext> {
+        let mut cfg = arachne_core::config::ArachneConfig::default();
+        cfg.media.store_dir = store_dir.to_string_lossy().to_string();
+        Arc::new(MediaContext::new(cfg).unwrap())
+    }
+
+    fn task_for(url: &str) -> CrawlTask {
+        CrawlTask {
+            url: url.to_string(),
+            job_id: uuid::Uuid::new_v4(),
+            domain: "127.0.0.1".into(),
+            depth: 0,
+            priority: 0,
+            kind: TaskKind::AudioFile,
+            media: Some(MediaMeta {
+                source_id: "t1".into(),
+                source: "test".into(),
+                collection: Some("unittest".into()),
+                license: "cc-by-4.0".into(),
+                title: Some("Unit Test Tone".into()),
+                artist: None,
+                album: None,
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn downloads_probes_and_stores_wav_end_to_end() {
+        let body = wav_bytes(35);
+        let (url, server) = spawn_one_shot_server(body.clone()).await;
+        let dir = std::env::temp_dir().join(format!("arachne-e2e-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let ctx = test_context(&dir).await;
+        let client = reqwest::Client::new();
+        let outcome = harvest_audio(&ctx, &client, &task_for(&url)).await;
+
+        assert!(
+            matches!(outcome.status, CrawlStatus::Success),
+            "expected success, got {:?} err={:?}",
+            outcome.status,
+            outcome.error
+        );
+        let stored = outcome.stored.as_ref().expect("stored");
+        let fs_path = stored.fs_path.as_ref().expect("local fs path");
+        assert!(fs_path.is_file(), "committed file missing at {fs_path:?}");
+        assert_eq!(outcome.format.as_deref(), Some("wav"));
+
+        let probe = outcome.probe.expect("probe result");
+        assert!(
+            (probe.duration_secs - 35.0).abs() < 3.0,
+            "unexpected duration {}",
+            probe.duration_secs
+        );
+        // Raw generated WAV carries no tags; title enrichment from MediaMeta
+        // happens in the worker's result assembly, not in harvest_audio.
+        assert_eq!(probe.title, None);
+        assert_eq!(outcome.bytes as usize, body.len());
+
+        // Content-addressed layout: <source>/<collection>/<sha[0:2]>/...
+        assert!(stored.object_path.starts_with("test/unittest/"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = server.await;
+    }
+
+    #[tokio::test]
+    async fn dedup_resolves_real_store_path() {
+        let body = wav_bytes(35);
+        let dir = std::env::temp_dir().join(format!("arachne-e2e-dedup-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = test_context(&dir).await;
+        let client = reqwest::Client::new();
+
+        let (url1, s1) = spawn_one_shot_server(body.clone()).await;
+        let first = harvest_audio(&ctx, &client, &task_for(&url1)).await;
+        assert!(matches!(first.status, CrawlStatus::Success), "{first:?}");
+        let first_path = first.stored.as_ref().unwrap().fs_path.clone().unwrap();
+
+        let (url2, s2) = spawn_one_shot_server(body).await; // same bytes, different URL
+        let second = harvest_audio(&ctx, &client, &task_for(&url2)).await;
+        assert!(
+            matches!(second.status, CrawlStatus::Success),
+            "dedup must still succeed: {second:?}"
+        );
+        let second_stored = second.stored.as_ref().unwrap();
+
+        // The dedup case must resolve to the SAME real file, not a placeholder.
+        assert_eq!(second_stored.object_path, first.stored.as_ref().unwrap().object_path);
+        assert!(second_stored.fs_path.as_ref().unwrap().is_file());
+        assert_eq!(second_stored.fs_path.as_ref().unwrap(), &first_path);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = s1.await;
+        let _ = s2.await;
     }
 }

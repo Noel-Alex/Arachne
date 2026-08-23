@@ -64,7 +64,9 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
         )
         .await?;
 
-    // tracks — the Sivana handoff manifest (one row per harvested audio file)
+    // tracks — the Sivana handoff manifest (one row per harvested audio file).
+    // status: pending | downloading | done | rejected | failed.
+    // leased_until: crash-recovery lease timestamp.
     session
         .query(
             "CREATE TABLE IF NOT EXISTS arachne.tracks (
@@ -85,9 +87,9 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 sha256 text,
                 bytes bigint,
                 object_path text,
-                status text,          -- pending | downloading | done | rejected | failed
+                status text,
                 error text,
-                leased_until bigint,  -- crash-recovery lease timestamp
+                leased_until bigint,
                 updated_at bigint,
                 PRIMARY KEY ((source), source_id)
             )",

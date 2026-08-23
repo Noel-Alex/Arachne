@@ -15,6 +15,12 @@ pub struct CrawlerMetrics {
     pub urls_deduped: IntCounter,
     pub urls_robots_blocked: IntCounter,
     pub bytes_downloaded: IntCounter,
+    /// Audio files that passed probe + quality gates.
+    pub audio_harvested: IntCounter,
+    /// Audio files rejected by probe/quality gates (quarantined).
+    pub audio_rejected: IntCounter,
+    /// Audio downloads that failed at transport level (HTTP, network).
+    pub audio_failed: IntCounter,
     pub crawl_duration_ms: Histogram,
     pub page_size_bytes: Histogram,
     pub active_tasks: IntGauge,
@@ -49,6 +55,21 @@ impl CrawlerMetrics {
         .unwrap();
         let bytes_downloaded =
             IntCounter::new("arachne_bytes_downloaded_total", "Total bytes downloaded").unwrap();
+        let audio_harvested = IntCounter::new(
+            "arachne_audio_harvested_total",
+            "Audio files passing probe and quality gates",
+        )
+        .unwrap();
+        let audio_rejected = IntCounter::new(
+            "arachne_audio_rejected_total",
+            "Audio files rejected by probe/quality gates",
+        )
+        .unwrap();
+        let audio_failed = IntCounter::new(
+            "arachne_audio_failed_total",
+            "Audio downloads failed at transport level",
+        )
+        .unwrap();
 
         let crawl_duration_ms = Histogram::with_opts(
             HistogramOpts::new("arachne_crawl_duration_ms", "Time to crawl a page")
@@ -82,6 +103,13 @@ impl CrawlerMetrics {
             .register(Box::new(bytes_downloaded.clone()))
             .unwrap();
         registry
+            .register(Box::new(audio_harvested.clone()))
+            .unwrap();
+        registry
+            .register(Box::new(audio_rejected.clone()))
+            .unwrap();
+        registry.register(Box::new(audio_failed.clone())).unwrap();
+        registry
             .register(Box::new(crawl_duration_ms.clone()))
             .unwrap();
         registry
@@ -98,6 +126,9 @@ impl CrawlerMetrics {
             urls_deduped,
             urls_robots_blocked,
             bytes_downloaded,
+            audio_harvested,
+            audio_rejected,
+            audio_failed,
             crawl_duration_ms,
             page_size_bytes,
             active_tasks,

@@ -48,6 +48,7 @@ pub struct ArachneRepo {
     get_domain_metadata_stmt: PreparedStatement,
     get_pages_by_domain_stmt: PreparedStatement,
     get_pending_tracks_stmt: PreparedStatement,
+    get_stale_leases_stmt: PreparedStatement,
     get_tracks_by_source_stmt: PreparedStatement,
 }
 
@@ -99,12 +100,18 @@ impl ArachneRepo {
             .await?;
 
         // Crash-recovery claim: pending rows, or downloading rows whose lease expired.
+        // Scylla CQL has no OR and rejects PER PARTITION LIMIT placement here,
+        // so this is two statements merged in Rust.
         let get_pending_tracks_stmt = session
-            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND (status = 'pending' OR (status = 'downloading' AND leased_until < ?)) PER PARTITION LIMIT ?")
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND status = 'pending' LIMIT ? ALLOW FILTERING")
+            .await?;
+        let get_stale_leases_stmt = session
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND status = 'downloading' AND leased_until < ? LIMIT ? ALLOW FILTERING")
             .await?;
 
+        // Full-source listing for exports (single partition scan).
         let get_tracks_by_source_stmt = session
-            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error FROM tracks WHERE source = ? PER PARTITION LIMIT ?")
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error FROM tracks WHERE source = ? LIMIT ?")
             .await?;
 
         Ok(Self {
@@ -119,6 +126,7 @@ impl ArachneRepo {
             get_domain_metadata_stmt,
             get_pages_by_domain_stmt,
             get_pending_tracks_stmt,
+            get_stale_leases_stmt,
             get_tracks_by_source_stmt,
         })
     }
@@ -452,18 +460,24 @@ impl ArachneRepo {
 
     /// Claim pending/expired-lease tracks for download. `lease_ms` is how long
     /// the claimant holds them before another pass may reclaim.
-    pub async fn claim_pending_tracks(
-        &self,
-        source: &str,
-        limit: i32,
-        lease_ms: i64,
-    ) -> Result<Vec<TrackRecord>> {
+    pub async fn claim_pending_tracks(&self, source: &str, limit: i32, lease_ms: i64) -> Result<Vec<TrackRecord>> {
         let now = Utc::now().timestamp_millis();
-        let rows = self
+
+        // Fresh work first, then reclaim stale leases (crash recovery).
+        let mut rows = self
             .session
-            .execute(&self.get_pending_tracks_stmt, (source, now, limit))
+            .execute(&self.get_pending_tracks_stmt, (source, limit))
             .await?
             .rows_or_empty();
+        if rows.len() < limit as usize {
+            let remaining = limit - rows.len() as i32;
+            let stale = self
+                .session
+                .execute(&self.get_stale_leases_stmt, (source, now, remaining))
+                .await?
+                .rows_or_empty();
+            rows.extend(stale);
+        }
 
         let mut claimed = Vec::new();
         let lease_until = now + lease_ms;

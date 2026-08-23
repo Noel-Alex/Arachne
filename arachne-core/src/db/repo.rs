@@ -82,9 +82,7 @@ impl ArachneRepo {
             .prepare("SELECT config FROM crawl_jobs WHERE job_id = ?")
             .await?;
 
-        let list_jobs_stmt = session
-            .prepare("SELECT config FROM crawl_jobs")
-            .await?;
+        let list_jobs_stmt = session.prepare("SELECT config FROM crawl_jobs").await?;
 
         let save_domain_metadata_stmt = session
             .prepare("INSERT INTO domain_metadata (domain, robots_txt, robots_fetched_at, crawl_delay_ms) VALUES (?, ?, ?, ?)")
@@ -136,7 +134,10 @@ impl ArachneRepo {
     }
 
     /// High-throughput ScyllaDB Unlogged Batch insertion (shard-aware, single round-trip).
-    pub async fn insert_crawl_results_batch(&self, results: &[(String, CrawlResult)]) -> Result<()> {
+    pub async fn insert_crawl_results_batch(
+        &self,
+        results: &[(String, CrawlResult)],
+    ) -> Result<()> {
         if results.is_empty() {
             return Ok(());
         }
@@ -167,20 +168,28 @@ impl ArachneRepo {
     }
 
     pub async fn check_url_exists(&self, domain: &str, job_id: Uuid, url: &str) -> Result<bool> {
-        let rows = self.session
+        let rows = self
+            .session
             .execute(&self.check_url_exists_stmt, (domain, job_id, url))
             .await?
             .rows_or_empty();
         Ok(!rows.is_empty())
     }
 
-    pub async fn check_urls_batch(&self, urls: Vec<(String, Uuid, String)>) -> Result<HashSet<String>> {
+    pub async fn check_urls_batch(
+        &self,
+        urls: Vec<(String, Uuid, String)>,
+    ) -> Result<HashSet<String>> {
         let mut futures = FuturesUnordered::new();
         for (domain, job_id, url) in urls {
             let stmt = &self.check_url_exists_stmt;
             let session = &self.session;
             futures.push(async move {
-                let exists = session.execute(stmt, (&domain, job_id, &url)).await?.rows_or_empty().len() > 0;
+                let exists = !session
+                    .execute(stmt, (&domain, job_id, &url))
+                    .await?
+                    .rows_or_empty()
+                    .is_empty();
                 if exists {
                     Ok::<_, anyhow::Error>(Some(url))
                 } else {
@@ -201,18 +210,42 @@ impl ArachneRepo {
     pub async fn insert_job(&self, job: &CrawlJob) -> Result<()> {
         let config_str = serde_json::to_string(job)?;
         let ts = chrono::Utc::now().timestamp_millis();
-        self.session.execute(&self.insert_job_stmt, (job.id, &job.name, format!("{:?}", job.status), config_str, ts, ts)).await?;
+        self.session
+            .execute(
+                &self.insert_job_stmt,
+                (
+                    job.id,
+                    &job.name,
+                    format!("{:?}", job.status),
+                    config_str,
+                    ts,
+                    ts,
+                ),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn update_job_status(&self, job_id: &Uuid, status: &JobStatus) -> Result<()> {
         let ts = chrono::Utc::now().timestamp_millis();
-        self.session.execute(&self.update_job_status_stmt, (format!("{:?}", status), ts, job_id)).await?;
+        self.session
+            .execute(
+                &self.update_job_status_stmt,
+                (format!("{:?}", status), ts, job_id),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn get_job(&self, job_id: &Uuid) -> Result<Option<CrawlJob>> {
-        if let Some(row) = self.session.execute(&self.get_job_stmt, (job_id,)).await?.rows_or_empty().into_iter().next() {
+        if let Some(row) = self
+            .session
+            .execute(&self.get_job_stmt, (job_id,))
+            .await?
+            .rows_or_empty()
+            .into_iter()
+            .next()
+        {
             let (config,): (String,) = row.into_typed()?;
             let job: CrawlJob = serde_json::from_str(&config)?;
             Ok(Some(job))
@@ -223,7 +256,11 @@ impl ArachneRepo {
 
     pub async fn list_jobs(&self) -> Result<Vec<CrawlJob>> {
         let mut jobs = Vec::new();
-        let rows = self.session.execute(&self.list_jobs_stmt, &[]).await?.rows_or_empty();
+        let rows = self
+            .session
+            .execute(&self.list_jobs_stmt, &[])
+            .await?
+            .rows_or_empty();
         for row in rows {
             let (config,): (String,) = row.into_typed()?;
             if let Ok(job) = serde_json::from_str(&config) {
@@ -233,15 +270,38 @@ impl ArachneRepo {
         Ok(jobs)
     }
 
-    pub async fn save_domain_metadata(&self, domain: &str, robots_txt: Option<&str>, crawl_delay_ms: Option<i32>) -> Result<()> {
+    pub async fn save_domain_metadata(
+        &self,
+        domain: &str,
+        robots_txt: Option<&str>,
+        crawl_delay_ms: Option<i32>,
+    ) -> Result<()> {
         let ts = chrono::Utc::now().timestamp_millis();
-        self.session.execute(&self.save_domain_metadata_stmt, (domain, robots_txt, ts, crawl_delay_ms)).await?;
+        self.session
+            .execute(
+                &self.save_domain_metadata_stmt,
+                (domain, robots_txt, ts, crawl_delay_ms),
+            )
+            .await?;
         Ok(())
     }
 
     pub async fn get_domain_metadata(&self, domain: &str) -> Result<Option<DomainMetadata>> {
-        if let Some(row) = self.session.execute(&self.get_domain_metadata_stmt, (domain,)).await?.rows_or_empty().into_iter().next() {
-            let (d, r, r_ts, d_ms, l_ts): (String, Option<String>, Option<i64>, Option<i32>, Option<i64>) = row.into_typed()?;
+        if let Some(row) = self
+            .session
+            .execute(&self.get_domain_metadata_stmt, (domain,))
+            .await?
+            .rows_or_empty()
+            .into_iter()
+            .next()
+        {
+            let (d, r, r_ts, d_ms, l_ts): (
+                String,
+                Option<String>,
+                Option<i64>,
+                Option<i32>,
+                Option<i64>,
+            ) = row.into_typed()?;
             let meta = DomainMetadata {
                 domain: d,
                 robots_txt: r,
@@ -257,9 +317,14 @@ impl ArachneRepo {
 
     pub async fn get_pages_by_domain(&self, domain: &str) -> Result<Vec<CrawledPageRecord>> {
         let mut records = Vec::new();
-        let rows = self.session.execute(&self.get_pages_by_domain_stmt, (domain,)).await?.rows_or_empty();
+        let rows = self
+            .session
+            .execute(&self.get_pages_by_domain_stmt, (domain,))
+            .await?
+            .rows_or_empty();
         for row in rows {
-            let (d, j, u, s, l, h, t, lang, r, c_ts): (
+            // (domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at_ms)
+            type PageRow = (
                 String,
                 Uuid,
                 String,
@@ -270,7 +335,8 @@ impl ArachneRepo {
                 Option<String>,
                 Option<String>,
                 Option<i64>,
-            ) = row.into_typed()?;
+            );
+            let (d, j, u, s, l, h, t, lang, r, c_ts): PageRow = row.into_typed()?;
 
             records.push(CrawledPageRecord {
                 domain: d,

@@ -11,7 +11,9 @@ pub fn is_acceptable_content_type(content_type: &str, allowed: &[String]) -> boo
         return true;
     }
     let lower_ct = content_type.to_lowercase();
-    allowed.iter().any(|ct| lower_ct.contains(&ct.to_lowercase()))
+    allowed
+        .iter()
+        .any(|ct| lower_ct.contains(&ct.to_lowercase()))
 }
 
 /// Check if the content size is within the allowed limit.

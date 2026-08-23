@@ -11,7 +11,10 @@ use uuid::Uuid;
 fn parse_size(s: &str) -> Option<usize> {
     let s = s.trim().to_uppercase();
     if let Some(num) = s.strip_suffix("GB") {
-        num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024 * 1024)
+        num.trim()
+            .parse::<usize>()
+            .ok()
+            .map(|n| n * 1024 * 1024 * 1024)
     } else if let Some(num) = s.strip_suffix("MB") {
         num.trim().parse::<usize>().ok().map(|n| n * 1024 * 1024)
     } else if let Some(num) = s.strip_suffix("KB") {
@@ -60,7 +63,8 @@ pub async fn run(
         url_patterns: None,
         exclude_patterns: None,
         max_pages,
-        max_pages_per_domain: max_pages_per_domain.or(Some(config.coordinator.max_pages_per_domain)),
+        max_pages_per_domain: max_pages_per_domain
+            .or(Some(config.coordinator.max_pages_per_domain)),
         max_depth,
         max_content_size: max_content_bytes,
         follow_external_links: follow_external,

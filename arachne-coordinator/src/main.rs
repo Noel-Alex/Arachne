@@ -72,14 +72,16 @@ async fn main() -> Result<()> {
     ));
 
     let discovery_processor = tokio::spawn(process_discovered_urls(
-        Arc::clone(&nats),
-        Arc::clone(&repo),
-        Arc::clone(&deduplicator),
-        Arc::clone(&domain_counts),
-        Arc::clone(&job_counts),
-        Arc::clone(&jobs_cache),
-        Arc::clone(&metrics),
-        max_pages_per_domain,
+        DiscoveryState {
+            nats: Arc::clone(&nats),
+            repo: Arc::clone(&repo),
+            deduplicator: Arc::clone(&deduplicator),
+            domain_counts: Arc::clone(&domain_counts),
+            job_counts: Arc::clone(&job_counts),
+            jobs_cache: Arc::clone(&jobs_cache),
+            metrics: Arc::clone(&metrics),
+            max_pages_per_domain,
+        },
         batch_size,
         shutdown_rx_discovery,
     ));
@@ -167,7 +169,8 @@ async fn process_results(
     }
 }
 
-async fn process_discovered_urls(
+/// Shared state for the discovery pipeline (admission control + dedup + dispatch).
+struct DiscoveryState {
     nats: Arc<NatsManager>,
     repo: Arc<ArachneRepo>,
     deduplicator: Arc<Deduplicator>,
@@ -176,9 +179,23 @@ async fn process_discovered_urls(
     jobs_cache: Arc<DashMap<Uuid, Option<CrawlJob>>>,
     metrics: Arc<CrawlerMetrics>,
     max_pages_per_domain: i64,
+}
+
+async fn process_discovered_urls(
+    state: DiscoveryState,
     batch_size: usize,
     mut shutdown_rx: tokio::sync::broadcast::Receiver<()>,
 ) {
+    let DiscoveryState {
+        nats,
+        repo,
+        deduplicator,
+        domain_counts,
+        job_counts,
+        jobs_cache,
+        metrics,
+        max_pages_per_domain,
+    } = state;
     info!("Discovery processor loop started");
 
     let consumer = match nats.create_discovery_consumer().await {
@@ -248,12 +265,11 @@ async fn process_discovered_urls(
                                 jobs_cache.insert(job_id, loaded);
                             }
 
-                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref() {
-                                if !job.is_url_allowed(&normalized_url, candidate.depth, &root_domain) {
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref()
+                                && !job.is_url_allowed(&normalized_url, candidate.depth, &root_domain) {
                                     debug!(url = %normalized_url, "URL disallowed by job crawl policy");
                                     continue;
                                 }
-                            }
 
                             db_checks.push((root_domain.clone(), job_id, normalized_url.clone()));
 
@@ -286,15 +302,14 @@ async fn process_discovered_urls(
                             }
 
                             let job_id = candidate.job_id;
-                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref() {
-                                if let Some(limit) = job.max_pages {
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref()
+                                && let Some(limit) = job.max_pages {
                                     let current_job_count = *job_counts.entry(job_id).or_insert(0);
                                     if current_job_count >= limit {
                                         debug!(job_id = %job_id, "Job limit reached, skipping URL");
                                         continue;
                                     }
                                 }
-                            }
 
                             *domain_counts.entry(root_domain.clone()).or_insert(0) += 1;
                             *job_counts.entry(job_id).or_insert(0) += 1;

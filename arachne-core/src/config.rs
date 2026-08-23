@@ -8,7 +8,7 @@ use figment::{
 use serde::{Deserialize, Serialize};
 
 /// Main configuration struct for Arachne.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct ArachneConfig {
     pub nats: NatsConfig,
     pub scylla: ScyllaConfig,
@@ -19,25 +19,12 @@ pub struct ArachneConfig {
     pub metrics: MetricsConfig,
 }
 
-impl Default for ArachneConfig {
-    fn default() -> Self {
-        Self {
-            nats: NatsConfig::default(),
-            scylla: ScyllaConfig::default(),
-            worker: WorkerConfig::default(),
-            coordinator: CoordinatorConfig::default(),
-            politeness: PolitenessConfig::default(),
-            storage: StorageConfig::default(),
-            metrics: MetricsConfig::default(),
-        }
-    }
-}
-
 impl ArachneConfig {
     /// Load configuration from defaults, an optional TOML file, and environment variables.
     pub fn load(config_path: Option<&str>) -> Result<Self> {
-        let mut figment = Figment::new()
-            .merge(figment::providers::Serialized::defaults(ArachneConfig::default()));
+        let mut figment = Figment::new().merge(figment::providers::Serialized::defaults(
+            ArachneConfig::default(),
+        ));
 
         if let Some(path) = config_path {
             figment = figment.merge(Toml::file(path));
@@ -139,7 +126,6 @@ pub struct PolitenessConfig {
     pub max_crawl_delay_ms: u64,
     pub robots_cache_ttl_secs: u64,
     pub respect_robots_txt: bool,
-    pub adaptive_throttling: bool,
 }
 
 impl Default for PolitenessConfig {
@@ -149,7 +135,6 @@ impl Default for PolitenessConfig {
             max_crawl_delay_ms: 30000,
             robots_cache_ttl_secs: 86400,
             respect_robots_txt: true,
-            adaptive_throttling: true,
         }
     }
 }

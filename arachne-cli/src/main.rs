@@ -135,30 +135,52 @@ async fn main() -> Result<()> {
     let config = arachne_core::config::ArachneConfig::load(Some(&cli.config))?;
 
     match cli.command {
-        Commands::Seed { urls, file, stdin, label } => {
-            commands::seed::run(config, urls, file, stdin, label).await
-        }
+        Commands::Seed {
+            urls,
+            file,
+            stdin,
+            label,
+        } => commands::seed::run(config, urls, file, stdin, label).await,
         Commands::Crawl {
-            seeds, name, max_pages, max_pages_per_domain,
-            max_depth, allowed_domains, follow_external,
-            crawl_delay, topic, max_content_size,
-            store_html, store_text, ignore_robots,
+            seeds,
+            name,
+            max_pages,
+            max_pages_per_domain,
+            max_depth,
+            allowed_domains,
+            follow_external,
+            crawl_delay,
+            topic,
+            max_content_size,
+            store_html,
+            store_text,
+            ignore_robots,
         } => {
             commands::crawl::run(
-                config, seeds, name, max_pages, max_pages_per_domain,
-                max_depth, allowed_domains, follow_external,
-                crawl_delay, topic, max_content_size,
-                store_html, store_text, ignore_robots,
-            ).await
+                config,
+                seeds,
+                name,
+                max_pages,
+                max_pages_per_domain,
+                max_depth,
+                allowed_domains,
+                follow_external,
+                crawl_delay,
+                topic,
+                max_content_size,
+                store_html,
+                store_text,
+                ignore_robots,
+            )
+            .await
         }
-        Commands::Status { job_id } => {
-            commands::status::run(config, job_id).await
-        }
-        Commands::Export { job_id, domain, format, output } => {
-            commands::export::run(config, job_id, domain, format, output).await
-        }
-        Commands::Inspect { domain } => {
-            commands::inspect::run(config, domain).await
-        }
+        Commands::Status { job_id } => commands::status::run(config, job_id).await,
+        Commands::Export {
+            job_id,
+            domain,
+            format,
+            output,
+        } => commands::export::run(config, job_id, domain, format, output).await,
+        Commands::Inspect { domain } => commands::inspect::run(config, domain).await,
     }
 }

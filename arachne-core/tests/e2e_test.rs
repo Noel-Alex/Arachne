@@ -23,7 +23,9 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     // 2. SSRF & Egress Boundary Test
     assert!(domain::is_safe_egress_url("https://example.com/docs"));
     assert!(!domain::is_safe_egress_url("http://127.0.0.1/admin"));
-    assert!(!domain::is_safe_egress_url("http://169.254.169.254/latest/meta-data/"));
+    assert!(!domain::is_safe_egress_url(
+        "http://169.254.169.254/latest/meta-data/"
+    ));
 
     // 3. Deduplication Engine
     let dedup = Deduplicator::new(10_000, 0.001);
@@ -40,9 +42,11 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     assert!(start.elapsed() >= Duration::from_millis(5));
 
     // 5. Job Crawl Policy Test
-    let mut job = CrawlJob::default();
-    job.max_depth = Some(2);
-    job.allowed_domains = Some(vec!["example.com".to_string()]);
+    let job = CrawlJob {
+        max_depth: Some(2),
+        allowed_domains: Some(vec!["example.com".to_string()]),
+        ..Default::default()
+    };
     assert!(job.is_url_allowed("https://example.com/docs", 1, "example.com"));
     assert!(!job.is_url_allowed("https://other.com/about", 1, "other.com"));
     assert!(!job.is_url_allowed("https://example.com/deep", 3, "example.com"));
@@ -69,7 +73,9 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     assert_eq!(extracted.language.as_deref(), Some("en"));
     assert!(extracted.text_content.contains("Welcome to Arachne"));
     assert_eq!(extracted.links.len(), 2);
-    assert!(extracted.links.contains(&"https://example.com/docs".to_string()));
+    assert!(extracted
+        .links
+        .contains(&"https://example.com/docs".to_string()));
 
     // 7. Task & Result Models
     let job_id = Uuid::new_v4();

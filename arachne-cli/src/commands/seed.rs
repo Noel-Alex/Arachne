@@ -1,10 +1,10 @@
 use anyhow::Result;
 use arachne_core::config::ArachneConfig;
-use arachne_core::nats::NatsManager;
 use arachne_core::models::CrawlTask;
+use arachne_core::nats::NatsManager;
+use std::io::{self, BufRead};
 use tracing::info;
 use uuid::Uuid;
-use std::io::{self, BufRead};
 
 /// Seed URLs into the crawl queue.
 pub async fn run(
@@ -38,10 +38,16 @@ pub async fn run(
     if stdin {
         let stdin_handle = io::stdin();
         for line in stdin_handle.lock().lines() {
-            if let Ok(url) = line {
-                let trimmed = url.trim().to_string();
-                if !trimmed.is_empty() {
-                    all_urls.push(trimmed);
+            match line {
+                Ok(url) => {
+                    let trimmed = url.trim().to_string();
+                    if !trimmed.is_empty() {
+                        all_urls.push(trimmed);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "Failed reading stdin line, stopping stdin read");
+                    break;
                 }
             }
         }
@@ -82,7 +88,11 @@ pub async fn run(
         success_count += 1;
     }
 
-    info!(seeded = success_count, skipped = all_urls.len() - success_count, "Seeding complete");
+    info!(
+        seeded = success_count,
+        skipped = all_urls.len() - success_count,
+        "Seeding complete"
+    );
     println!("✔ Seeded {} URLs (job: {})", success_count, job_id);
     Ok(())
 }

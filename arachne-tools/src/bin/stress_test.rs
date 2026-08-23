@@ -19,7 +19,10 @@ async fn main() -> Result<()> {
 
     let job_id = Uuid::new_v4();
     println!("Job ID: {}", job_id);
-    println!("Pushing {} synthetic URLs with pipelined batching (batch size: {})...", TOTAL_URLS, BATCH_SIZE);
+    println!(
+        "Pushing {} synthetic URLs with pipelined batching (batch size: {})...",
+        TOTAL_URLS, BATCH_SIZE
+    );
 
     let start = Instant::now();
     let mut tasks = Vec::with_capacity(BATCH_SIZE);
@@ -42,7 +45,12 @@ async fn main() -> Result<()> {
             if (i + 1) % 200_000 == 0 {
                 let elapsed = start.elapsed().as_secs_f64();
                 let rate = (i + 1) as f64 / elapsed;
-                println!("> Progress: {} / {} URLs pushed ({:.1} tasks/sec)", i + 1, TOTAL_URLS, rate);
+                println!(
+                    "> Progress: {} / {} URLs pushed ({:.1} tasks/sec)",
+                    i + 1,
+                    TOTAL_URLS,
+                    rate
+                );
             }
         }
     }
@@ -53,7 +61,10 @@ async fn main() -> Result<()> {
 
     let elapsed = start.elapsed().as_secs_f64();
     let rate = TOTAL_URLS as f64 / elapsed;
-    println!("\n🚀 SUCCESS! Published {} tasks in {:.2}s ({:.1} tasks/sec)", TOTAL_URLS, elapsed, rate);
+    println!(
+        "\n🚀 SUCCESS! Published {} tasks in {:.2}s ({:.1} tasks/sec)",
+        TOTAL_URLS, elapsed, rate
+    );
     println!("===============================================================");
 
     Ok(())

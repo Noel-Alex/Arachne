@@ -1,7 +1,9 @@
 //! Politeness and rate limiting for domains.
 
 use dashmap::DashMap;
-use governor::{clock::DefaultClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter};
+use governor::{
+    clock::DefaultClock, state::direct::NotKeyed, state::InMemoryState, Quota, RateLimiter,
+};
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,7 +31,9 @@ impl PolitenessLimiter {
             self.limiters
                 .entry(domain.to_string())
                 .or_insert_with(|| {
-                    Arc::new(RateLimiter::direct(Quota::with_period(self.default_delay).unwrap()))
+                    Arc::new(RateLimiter::direct(
+                        Quota::with_period(self.default_delay).unwrap(),
+                    ))
                 })
                 .value()
                 .clone()
@@ -40,9 +44,8 @@ impl PolitenessLimiter {
 
     /// Set a custom delay for a specific domain (e.g. from robots.txt).
     pub fn set_domain_delay(&self, domain: &str, delay: Duration) {
-        let limit = Quota::with_period(delay).unwrap_or_else(|| {
-            Quota::per_second(NonZeroU32::new(1).unwrap())
-        });
+        let limit = Quota::with_period(delay)
+            .unwrap_or_else(|| Quota::per_second(NonZeroU32::new(1).unwrap()));
         let limiter = Arc::new(RateLimiter::direct(limit));
         self.limiters.insert(domain.to_string(), limiter);
     }

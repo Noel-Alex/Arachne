@@ -91,7 +91,11 @@ impl RobotsManager {
                     return Some(cached);
                 }
             }
-            Ok(res) => debug!("Failed to fetch robots.txt for {}: HTTP {}", authority, res.status()),
+            Ok(res) => debug!(
+                "Failed to fetch robots.txt for {}: HTTP {}",
+                authority,
+                res.status()
+            ),
             Err(e) => warn!("Failed to fetch robots.txt for {}: {}", authority, e),
         }
 

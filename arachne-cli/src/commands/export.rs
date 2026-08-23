@@ -80,7 +80,10 @@ pub async fn run(
             println!("✔ Successfully exported CSV to {}", file_path);
         }
         _ => {
-            eprintln!("Unsupported format '{}'. Supported formats: json, csv", format);
+            eprintln!(
+                "Unsupported format '{}'. Supported formats: json, csv",
+                format
+            );
         }
     }
 

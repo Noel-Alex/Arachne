@@ -69,6 +69,9 @@ async fn main() -> Result<()> {
         .user_agent(&config.worker.user_agent)
         .timeout(Duration::from_secs(config.worker.request_timeout_secs))
         .connect_timeout(Duration::from_secs(config.worker.connect_timeout_secs))
+        .redirect(reqwest::redirect::Policy::limited(
+            config.worker.max_redirects,
+        ))
         .pool_max_idle_per_host(100)
         .pool_idle_timeout(Duration::from_secs(90))
         .tcp_keepalive(Duration::from_secs(60))
@@ -167,7 +170,13 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     // 1. SSRF & Egress Boundary Check
     if !domain::is_safe_egress_url(&task.url) {
         warn!(url = %task.url, "URL blocked by SSRF boundary guard");
-        let res = record_failure(&ctx, &task, CrawlStatus::FetchError("Blocked by SSRF boundary guard".into()), 0).await;
+        let res = record_failure(
+            &ctx,
+            &task,
+            CrawlStatus::FetchError("Blocked by SSRF boundary guard".into()),
+            0,
+        )
+        .await;
         ctx.metrics.active_tasks.dec();
         return res;
     }
@@ -328,7 +337,10 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
                     let abs_path = fs::canonicalize(&storage_path)
                         .await
                         .unwrap_or(storage_path);
-                    Some(format!("file:///{}", abs_path.to_string_lossy().replace('\\', "/")))
+                    Some(format!(
+                        "file:///{}",
+                        abs_path.to_string_lossy().replace('\\', "/")
+                    ))
                 }
             }
             Err(e) => {
@@ -386,12 +398,8 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     }
 
     ctx.metrics.pages_crawled.inc();
-    ctx.metrics
-        .bytes_downloaded
-        .inc_by(body_bytes.len() as u64);
-    ctx.metrics
-        .crawl_duration_ms
-        .observe(duration_ms as f64);
+    ctx.metrics.bytes_downloaded.inc_by(body_bytes.len() as u64);
+    ctx.metrics.crawl_duration_ms.observe(duration_ms as f64);
     ctx.metrics.active_tasks.dec();
 
     true

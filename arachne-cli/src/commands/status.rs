@@ -31,7 +31,7 @@ pub async fn run(config: ArachneConfig, job_id: Option<String>) -> Result<()> {
         if jobs.is_empty() {
             println!("No crawl jobs found.");
         } else {
-            println!("{:<38} {:<20} {:<12} {}", "ID", "Name", "Status", "Created");
+            println!("{:<38} {:<20} {:<12} Created", "ID", "Name", "Status");
             println!("{}", "-".repeat(90));
             for job in jobs {
                 println!(

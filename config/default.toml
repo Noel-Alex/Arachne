@@ -10,7 +10,7 @@ uri = "127.0.0.1:9042"
 keyspace = "arachne"
 
 [worker]
-max_concurrent_requests = 10000
+max_concurrent_requests = 512
 request_timeout_secs = 15
 connect_timeout_secs = 5
 max_content_size_bytes = 5242880  # 5MB
@@ -27,11 +27,10 @@ dedup_bloom_capacity = 100000000
 dedup_bloom_fp_rate = 0.001
 
 [politeness]
-default_crawl_delay_ms = 10
+default_crawl_delay_ms = 250
 max_crawl_delay_ms = 5000
 robots_cache_ttl_secs = 86400
 respect_robots_txt = true
-adaptive_throttling = false
 
 [storage]
 content_dir = "./crawled_data"

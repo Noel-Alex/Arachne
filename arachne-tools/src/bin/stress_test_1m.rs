@@ -2,8 +2,8 @@ use anyhow::Result;
 use arachne_core::config::ArachneConfig;
 use arachne_core::models::CrawlTask;
 use arachne_core::nats::NatsManager;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -24,7 +24,10 @@ async fn main() -> Result<()> {
 
     let job_id = Uuid::new_v4();
     println!("Job ID: {}", job_id);
-    println!("Target: {} URLs across {} parallel producer tasks (batch size: {})...", TOTAL_URLS, CONCURRENT_PRODUCERS, BATCH_PER_PRODUCER);
+    println!(
+        "Target: {} URLs across {} parallel producer tasks (batch size: {})...",
+        TOTAL_URLS, CONCURRENT_PRODUCERS, BATCH_PER_PRODUCER
+    );
 
     let published_counter = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
@@ -86,7 +89,10 @@ async fn main() -> Result<()> {
             if current > last_reported {
                 let elapsed = start.elapsed().as_secs_f64();
                 let rate = current as f64 / elapsed;
-                println!("> Progress: {} / {} URLs published ({:.1} msg/sec)", current, TOTAL_URLS, rate);
+                println!(
+                    "> Progress: {} / {} URLs published ({:.1} msg/sec)",
+                    current, TOTAL_URLS, rate
+                );
                 last_reported = current;
             }
             if current >= TOTAL_URLS {
@@ -107,7 +113,11 @@ async fn main() -> Result<()> {
     println!("\n🔥 CONFIRMED ACKNOWLEDGED PUBLISH BENCHMARK RESULT 🔥");
     println!("  Total Messages ACKed: {}", total);
     println!("  Time Taken:           {:.2} seconds", elapsed);
-    println!("  Throughput:           {:.1} msg/sec ({:.2} Million msg/min)", final_rate, (final_rate * 60.0) / 1_000_000.0);
+    println!(
+        "  Throughput:           {:.1} msg/sec ({:.2} Million msg/min)",
+        final_rate,
+        (final_rate * 60.0) / 1_000_000.0
+    );
     println!("===============================================================");
 
     Ok(())

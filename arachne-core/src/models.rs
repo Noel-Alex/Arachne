@@ -52,7 +52,12 @@ pub struct CrawlJob {
 
 impl CrawlJob {
     /// Evaluate whether a candidate URL and depth adhere to job rules.
-    pub fn is_url_allowed(&self, candidate_url: &str, current_depth: u32, candidate_root_domain: &str) -> bool {
+    pub fn is_url_allowed(
+        &self,
+        candidate_url: &str,
+        current_depth: u32,
+        candidate_root_domain: &str,
+    ) -> bool {
         // 1. Max depth check
         if let Some(max_depth) = self.max_depth {
             if current_depth > max_depth {
@@ -62,7 +67,11 @@ impl CrawlJob {
 
         // 2. Allowed domains check
         if let Some(ref domains) = self.allowed_domains {
-            if !domains.is_empty() && !domains.iter().any(|d| d.eq_ignore_ascii_case(candidate_root_domain)) {
+            if !domains.is_empty()
+                && !domains
+                    .iter()
+                    .any(|d| d.eq_ignore_ascii_case(candidate_root_domain))
+            {
                 return false;
             }
         }

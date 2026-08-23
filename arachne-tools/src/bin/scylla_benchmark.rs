@@ -4,8 +4,8 @@ use arachne_core::db::ArachneRepo;
 use arachne_core::models::{CrawlResult, CrawlStatus};
 use chrono::Utc;
 use futures::future::join_all;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 use uuid::Uuid;
 
@@ -25,7 +25,10 @@ async fn main() -> Result<()> {
 
     let job_id = Uuid::new_v4();
     println!("Job ID: {}", job_id);
-    println!("Inserting {} rows across {} parallel ScyllaDB futures (batch size: {})...", TOTAL_RECORDS, PARALLEL_WORKERS, BATCH_SIZE);
+    println!(
+        "Inserting {} rows across {} parallel ScyllaDB futures (batch size: {})...",
+        TOTAL_RECORDS, PARALLEL_WORKERS, BATCH_SIZE
+    );
 
     let counter = Arc::new(AtomicUsize::new(0));
     let start = Instant::now();
@@ -94,7 +97,11 @@ async fn main() -> Result<()> {
     println!("\n🔥 CONFIRMED SCYLLADB BENCHMARK RESULT 🔥");
     println!("  Total Rows Inserted: {}", total);
     println!("  Time Elapsed:        {:.2} seconds", elapsed);
-    println!("  Write Throughput:    {:.1} CQL inserts/sec ({:.2} Million rows/min)", rate, (rate * 60.0) / 1_000_000.0);
+    println!(
+        "  Write Throughput:    {:.1} CQL inserts/sec ({:.2} Million rows/min)",
+        rate,
+        (rate * 60.0) / 1_000_000.0
+    );
     println!("===============================================================");
 
     Ok(())

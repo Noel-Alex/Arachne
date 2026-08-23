@@ -149,16 +149,27 @@ mod tests {
 
     #[test]
     fn test_extract_root_domain() {
-        assert_eq!(extract_root_domain("http://example.com").unwrap(), "example.com");
-        assert_eq!(extract_root_domain("https://www.example.com").unwrap(), "example.com");
-        assert_eq!(extract_root_domain("http://blog.example.co.uk").unwrap(), "example.co.uk");
+        assert_eq!(
+            extract_root_domain("http://example.com").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            extract_root_domain("https://www.example.com").unwrap(),
+            "example.com"
+        );
+        assert_eq!(
+            extract_root_domain("http://blog.example.co.uk").unwrap(),
+            "example.co.uk"
+        );
     }
 
     #[test]
     fn test_ssrf_protection() {
         assert!(is_safe_egress_url("https://example.com/path"));
         assert!(!is_safe_egress_url("http://127.0.0.1/admin"));
-        assert!(!is_safe_egress_url("http://169.254.169.254/latest/meta-data/"));
+        assert!(!is_safe_egress_url(
+            "http://169.254.169.254/latest/meta-data/"
+        ));
         assert!(!is_safe_egress_url("http://192.168.1.1"));
         assert!(!is_safe_egress_url("http://localhost:8000"));
         assert!(!is_safe_egress_url("file:///etc/passwd"));

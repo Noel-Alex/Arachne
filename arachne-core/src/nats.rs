@@ -61,7 +61,7 @@ impl NatsManager {
                 subjects: vec![SUBJECT_RESULT.to_string()],
                 retention: RetentionPolicy::Limits,
                 max_age: Duration::from_secs(7 * 24 * 3600), // 7 days
-                max_bytes: 50 * 1024 * 1024 * 1024, // 50GB limit
+                max_bytes: 50 * 1024 * 1024 * 1024,          // 50GB limit
                 ..Default::default()
             })
             .await?;
@@ -95,7 +95,8 @@ impl NatsManager {
         let mut futures = Vec::with_capacity(tasks.len());
         for task in tasks {
             let payload = serde_json::to_vec(task)?;
-            let ack_fut = self.jetstream
+            let ack_fut = self
+                .jetstream
                 .publish(SUBJECT_TASK.to_string(), payload.into())
                 .await?;
             futures.push(async move { ack_fut.await });
@@ -113,7 +114,8 @@ impl NatsManager {
         let mut futures = Vec::with_capacity(tasks.len());
         for task in tasks {
             let payload = bincode::serialize(task)?;
-            let ack_fut = self.jetstream
+            let ack_fut = self
+                .jetstream
                 .publish(SUBJECT_TASK.to_string(), payload.into())
                 .await?;
             futures.push(async move { ack_fut.await });
@@ -141,7 +143,8 @@ impl NatsManager {
         let mut futures = Vec::with_capacity(results.len());
         for result in results {
             let payload = serde_json::to_vec(result)?;
-            let ack_fut = self.jetstream
+            let ack_fut = self
+                .jetstream
                 .publish(SUBJECT_RESULT.to_string(), payload.into())
                 .await?;
             futures.push(async move { ack_fut.await });
@@ -165,7 +168,10 @@ impl NatsManager {
     }
 
     /// Create a consumer for tasks (worker).
-    pub async fn create_task_consumer(&self, worker_name: &str) -> Result<consumer::Consumer<PullConfig>> {
+    pub async fn create_task_consumer(
+        &self,
+        worker_name: &str,
+    ) -> Result<consumer::Consumer<PullConfig>> {
         let stream = self.jetstream.get_stream(STREAM_CRAWL_TASKS).await?;
         let consumer = stream
             .get_or_create_consumer(

@@ -4,4 +4,5 @@ target/
 crawled_data/
 urlscan_batches/
 *.parquet
-Cargo.lock
+Cargo.lockmedia_store/
+handoff/

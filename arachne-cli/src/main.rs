@@ -117,6 +117,21 @@ enum Commands {
         output: String,
     },
 
+    /// Export the track manifest for a source as a Sivana handoff snapshot
+    TracksExport {
+        /// Source adapter name (e.g. "jamendo", "archive-org")
+        #[arg(short, long)]
+        source: String,
+
+        /// Output directory for manifest.jsonl.zst / manifest.json / attribution.txt
+        #[arg(short, long, default_value = "./handoff")]
+        output: String,
+
+        /// Include pending/failed/rejected tracks too (default exports done-only)
+        #[arg(long)]
+        include_incomplete: bool,
+    },
+
     /// Inspect domain information
     Inspect {
         /// Domain to inspect
@@ -181,6 +196,11 @@ async fn main() -> Result<()> {
             format,
             output,
         } => commands::export::run(config, job_id, domain, format, output).await,
+        Commands::TracksExport {
+            source,
+            output,
+            include_incomplete,
+        } => commands::tracks_export::run(config, source, output, include_incomplete).await,
         Commands::Inspect { domain } => commands::inspect::run(config, domain).await,
     }
 }

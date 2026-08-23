@@ -1,16 +1,19 @@
+pub mod media_download;
+
 use anyhow::{Context, Result};
 use arachne_core::{
     config::ArachneConfig,
     content::{extractor, filter},
     domain, logging,
     metrics::{self, CrawlerMetrics},
-    models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl},
+    models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl, TaskKind},
     nats::NatsManager,
     politeness::PolitenessLimiter,
     robots::RobotsManager,
 };
 use chrono::Utc;
 use futures::StreamExt;
+use media_download::{harvest_audio, MediaContext};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -29,6 +32,7 @@ struct WorkerContext {
     robots: RobotsManager,
     politeness: PolitenessLimiter,
     http_client: Client,
+    media: Arc<MediaContext>,
     metrics: Arc<CrawlerMetrics>,
 }
 
@@ -79,12 +83,17 @@ async fn main() -> Result<()> {
         .build()
         .context("Failed to build HTTP client")?;
 
+    let media_ctx = Arc::new(
+        MediaContext::new(config.clone()).context("Failed to initialize media store")?,
+    );
+
     let ctx = Arc::new(WorkerContext {
         config: config.clone(),
         nats: Arc::clone(&nats),
         robots,
         politeness,
         http_client,
+        media: media_ctx,
         metrics: Arc::clone(&metrics),
     });
 
@@ -190,6 +199,11 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
             return res;
         }
     };
+
+    // Media tasks take the streaming binary download path.
+    if task.kind == TaskKind::AudioFile {
+        return process_audio_task(ctx, task).await;
+    }
 
     let domain = domain::extract_root_domain(&task.url).unwrap_or_else(|| "unknown".to_string());
 
@@ -378,6 +392,8 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
         discovered_urls: discovered_urls.clone(),
         crawl_duration_ms: duration_ms,
         crawled_at: Utc::now(),
+        media_meta: None,
+        media_probe: None,
     };
 
     if let Err(e) = ctx.nats.publish_result(&result).await {
@@ -405,6 +421,71 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     true
 }
 
+async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
+    let start_time = Instant::now();
+    let domain = domain::extract_root_domain(&task.url).unwrap_or_else(|| "unknown".to_string());
+
+    let outcome = harvest_audio(&ctx.media, &ctx.http_client, &task).await;
+
+    let result = CrawlResult {
+        source_url: task.url.clone(),
+        job_id: task.job_id,
+        status: outcome.status,
+        domain: Some(domain),
+        content_ref: outcome.stored.as_ref().map(|s| {
+            s.fs_path
+                .as_ref()
+                .map(|p| format!("file://{}", p.to_string_lossy().replace('\\', "/")))
+                .unwrap_or_else(|| format!("object://{}", s.object_path))
+        }),
+        title: outcome.probe.as_ref().and_then(|p| p.title.clone()).or_else(|| task.media.as_ref().and_then(|m| m.title.clone())),
+        language: None,
+        content_length: Some(outcome.bytes as usize),
+        content_hash: None, // set below from the store path
+        discovered_urls: vec![],
+        crawl_duration_ms: start_time.elapsed().as_millis() as u64,
+        crawled_at: Utc::now(),
+        media_meta: task.media.clone(),
+        media_probe: outcome.format.as_ref().map(|fmt| arachne_core::models::MediaProbe {
+            duration_secs: outcome.probe.as_ref().map(|p| p.duration_secs).unwrap_or(0.0),
+            bitrate_kbps: outcome.probe.as_ref().and_then(|p| p.bitrate_kbps).map(|b| b as i32),
+            format: fmt.clone(),
+            title: outcome.probe.as_ref().and_then(|p| p.title.clone()),
+            artist: outcome.probe.as_ref().and_then(|p| p.artist.clone()),
+            album: outcome.probe.as_ref().and_then(|p| p.album.clone()),
+            year: outcome.probe.as_ref().and_then(|p| p.year),
+            genre: outcome.probe.as_ref().and_then(|p| p.genre.clone()),
+        }),
+    };
+
+    // The store path encodes the sha256; carry it explicitly for the manifest.
+    let mut result = result;
+    if let Some(stored) = &outcome.stored {
+        let hash = stored
+            .object_path
+            .rsplit('/')
+            .next()
+            .and_then(|f| f.split('.').next())
+            .unwrap_or("")
+            .to_string();
+        if hash.len() == 64 {
+            result.content_hash = Some(hash);
+        } else {
+            result.content_hash = None; // dedup-skip case ("already-present:<hash>")
+        }
+    } else {
+        result.content_hash = None;
+    }
+
+    match ctx.nats.publish_result(&result).await {
+        Ok(_) => true,
+        Err(e) => {
+            error!("Failed to publish media crawl result: {}", e);
+            false
+        }
+    }
+}
+
 async fn record_failure(
     ctx: &Arc<WorkerContext>,
     task: &CrawlTask,
@@ -425,6 +506,8 @@ async fn record_failure(
         discovered_urls: vec![],
         crawl_duration_ms: duration_ms,
         crawled_at: Utc::now(),
+        media_meta: task.media.clone(),
+        media_probe: None,
     };
 
     if let Err(e) = ctx.nats.publish_result(&result).await {

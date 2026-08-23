@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use uuid::Uuid;
 
 use crate::config::ScyllaConfig;
-use crate::models::{CrawlJob, CrawlResult, JobStatus};
+use crate::models::{CrawlJob, CrawlResult, JobStatus, TrackRecord, TrackStatus};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DomainMetadata {
@@ -47,6 +47,8 @@ pub struct ArachneRepo {
     save_domain_metadata_stmt: PreparedStatement,
     get_domain_metadata_stmt: PreparedStatement,
     get_pages_by_domain_stmt: PreparedStatement,
+    get_pending_tracks_stmt: PreparedStatement,
+    get_tracks_by_source_stmt: PreparedStatement,
 }
 
 impl ArachneRepo {
@@ -96,6 +98,15 @@ impl ArachneRepo {
             .prepare("SELECT domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at FROM crawled_pages WHERE domain = ?")
             .await?;
 
+        // Crash-recovery claim: pending rows, or downloading rows whose lease expired.
+        let get_pending_tracks_stmt = session
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND (status = 'pending' OR (status = 'downloading' AND leased_until < ?)) PER PARTITION LIMIT ?")
+            .await?;
+
+        let get_tracks_by_source_stmt = session
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error FROM tracks WHERE source = ? PER PARTITION LIMIT ?")
+            .await?;
+
         Ok(Self {
             session,
             insert_crawl_result_stmt,
@@ -107,6 +118,8 @@ impl ArachneRepo {
             save_domain_metadata_stmt,
             get_domain_metadata_stmt,
             get_pages_by_domain_stmt,
+            get_pending_tracks_stmt,
+            get_tracks_by_source_stmt,
         })
     }
 
@@ -352,5 +365,182 @@ impl ArachneRepo {
             });
         }
         Ok(records)
+    }
+
+    // ---- Track manifest (Sivana handoff) ----
+
+    /// Insert or update a track row (full upsert by (source, source_id)).
+    /// Split into two statements because tuple serialization caps at 16 values.
+    pub async fn upsert_track(&self, t: &TrackRecord) -> Result<()> {
+        let now = Utc::now().timestamp_millis();
+        self.session
+            .query(
+                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    &t.source,
+                    &t.source_id,
+                    t.job_id,
+                    &t.url,
+                    &t.title,
+                    &t.artist,
+                    &t.album,
+                    &t.year,
+                    &t.genre,
+                    &t.license,
+                    &t.collection,
+                ),
+            )
+            .await?;
+
+        self.session
+            .query(
+                "UPDATE tracks SET duration_secs = ?, bitrate_kbps = ?, format = ?, sha256 = ?, bytes = ?, object_path = ?, status = ?, error = ?, updated_at = ? WHERE source = ? AND source_id = ?",
+                (
+                    &t.duration_secs,
+                    &t.bitrate_kbps,
+                    &t.format,
+                    &t.sha256,
+                    &t.bytes,
+                    &t.object_path,
+                    t.status.as_str(),
+                    &t.error,
+                    now,
+                    &t.source,
+                    &t.source_id,
+                ),
+            )
+            .await?;
+        Ok(())
+    }
+
+    /// Claim pending/expired-lease tracks for download. `lease_ms` is how long
+    /// the claimant holds them before another pass may reclaim.
+    pub async fn claim_pending_tracks(
+        &self,
+        source: &str,
+        limit: i32,
+        lease_ms: i64,
+    ) -> Result<Vec<TrackRecord>> {
+        let now = Utc::now().timestamp_millis();
+        let rows = self
+            .session
+            .execute(&self.get_pending_tracks_stmt, (source, now, limit))
+            .await?
+            .rows_or_empty();
+
+        let mut claimed = Vec::new();
+        let lease_until = now + lease_ms;
+        for row in rows {
+            type PendingRow = (
+                String,
+                String,
+                Uuid,
+                String,
+                Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<i32>,
+                Option<String>,
+                String,
+                Option<String>,
+                String,
+                Option<String>,
+            );
+            let (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status_s, error): PendingRow =
+                row.into_typed()?;
+
+            // Take the lease before returning it to the caller.
+            self.session
+                .query(
+                    "UPDATE tracks SET status = 'downloading', leased_until = ?, updated_at = ? WHERE source = ? AND source_id = ?",
+                    (lease_until, Utc::now().timestamp_millis(), &source, &source_id),
+                )
+                .await?;
+
+            claimed.push(TrackRecord {
+                source,
+                source_id,
+                job_id,
+                url,
+                title,
+                artist,
+                album,
+                year,
+                genre,
+                license,
+                collection,
+                duration_secs: None,
+                bitrate_kbps: None,
+                format: None,
+                sha256: None,
+                bytes: None,
+                object_path: None,
+                status: TrackStatus::Downloading,
+                error,
+            });
+            let _ = status_s;
+        }
+        Ok(claimed)
+    }
+
+    /// All tracks for a source regardless of state (for exports).
+    pub async fn list_tracks_by_source(&self, source: &str, limit: i32) -> Result<Vec<TrackRecord>> {
+        let rows = self
+            .session
+            .execute(&self.get_tracks_by_source_stmt, (source, limit))
+            .await?
+            .rows_or_empty();
+
+        // Derived row type: tuple serialization caps at 16 values, this query has 19 columns.
+        #[derive(scylla::macros::FromRow)]
+        #[scylla_crate = "scylla"]
+        struct TrackRow {
+            source: String,
+            source_id: String,
+            job_id: Uuid,
+            url: String,
+            title: Option<String>,
+            artist: Option<String>,
+            album: Option<String>,
+            year: Option<i32>,
+            genre: Option<String>,
+            license: String,
+            collection: Option<String>,
+            duration_secs: Option<f64>,
+            bitrate_kbps: Option<i32>,
+            format: Option<String>,
+            sha256: Option<String>,
+            bytes: Option<i64>,
+            object_path: Option<String>,
+            status: String,
+            error: Option<String>,
+        }
+
+        let mut tracks = Vec::new();
+        for row in rows {
+            let r: TrackRow = row.into_typed()?;
+            tracks.push(TrackRecord {
+                source: r.source,
+                source_id: r.source_id,
+                job_id: r.job_id,
+                url: r.url,
+                title: r.title,
+                artist: r.artist,
+                album: r.album,
+                year: r.year,
+                genre: r.genre,
+                license: r.license,
+                collection: r.collection,
+                duration_secs: r.duration_secs,
+                bitrate_kbps: r.bitrate_kbps,
+                format: r.format,
+                sha256: r.sha256,
+                bytes: r.bytes,
+                object_path: r.object_path,
+                status: TrackStatus::parse(&r.status),
+                error: r.error,
+            });
+        }
+        Ok(tracks)
     }
 }

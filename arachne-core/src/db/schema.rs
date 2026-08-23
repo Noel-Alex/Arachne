@@ -64,5 +64,36 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
         )
         .await?;
 
+    // tracks — the Sivana handoff manifest (one row per harvested audio file)
+    session
+        .query(
+            "CREATE TABLE IF NOT EXISTS arachne.tracks (
+                source text,
+                source_id text,
+                job_id uuid,
+                url text,
+                title text,
+                artist text,
+                album text,
+                year int,
+                genre text,
+                license text,
+                collection text,
+                duration_secs double,
+                bitrate_kbps int,
+                format text,
+                sha256 text,
+                bytes bigint,
+                object_path text,
+                status text,          -- pending | downloading | done | rejected | failed
+                error text,
+                leased_until bigint,  -- crash-recovery lease timestamp
+                updated_at bigint,
+                PRIMARY KEY ((source), source_id)
+            )",
+            &[],
+        )
+        .await?;
+
     Ok(())
 }

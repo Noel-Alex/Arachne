@@ -52,6 +52,8 @@ async fn main() -> Result<()> {
                     domain: format!("domain-{}.com", domain_id),
                     depth: 0,
                     priority: 1,
+                    kind: Default::default(),
+                    media: None,
                 };
                 tasks.push(task);
 

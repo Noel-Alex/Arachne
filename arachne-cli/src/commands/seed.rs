@@ -82,6 +82,8 @@ pub async fn run(
             domain,
             depth: 0,
             priority: 100, // Seeds get highest priority
+            kind: Default::default(),
+            media: None,
         };
 
         nats.publish_task(&task).await?;

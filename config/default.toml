@@ -37,6 +37,16 @@ content_dir = "./crawled_data"
 store_raw_html = true
 store_extracted_text = true
 
+[media]
+store_dir = "./media_store"
+max_audio_size_bytes = 524288000   # 500MB
+min_free_bytes = 5368709120        # 5GB
+max_total_bytes = 0                # unlimited
+min_duration_secs = 30
+max_duration_secs = 1800
+min_bitrate_kbps = 96
+per_host_concurrency = 4
+
 [metrics]
 enabled = true
 port = 9191

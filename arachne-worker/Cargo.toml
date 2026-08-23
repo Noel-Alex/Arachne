@@ -29,3 +29,5 @@ encoding_rs = { workspace = true }
 uuid = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
+dashmap = { workspace = true }
+infer = "0.16"

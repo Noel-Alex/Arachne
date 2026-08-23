@@ -85,6 +85,8 @@ async fn test_e2e_pipeline_components() -> Result<()> {
         domain: root_domain.clone(),
         depth: 0,
         priority: 10,
+        kind: Default::default(),
+        media: None,
     };
 
     let result = CrawlResult {
@@ -109,6 +111,8 @@ async fn test_e2e_pipeline_components() -> Result<()> {
             .collect(),
         crawl_duration_ms: 25,
         crawled_at: chrono::Utc::now(),
+        media_meta: None,
+        media_probe: None,
     };
 
     assert!(result.status.is_success());

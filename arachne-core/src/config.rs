@@ -16,6 +16,7 @@ pub struct ArachneConfig {
     pub coordinator: CoordinatorConfig,
     pub politeness: PolitenessConfig,
     pub storage: StorageConfig,
+    pub media: MediaConfig,
     pub metrics: MetricsConfig,
 }
 
@@ -169,6 +170,40 @@ impl Default for MetricsConfig {
         Self {
             enabled: true,
             port: 9191,
+        }
+    }
+}
+
+/// Configuration for media (audio) harvesting.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaConfig {
+    /// Root directory of the content-addressed media store.
+    pub store_dir: String,
+    /// Hard cap per audio file (default 500MB).
+    pub max_audio_size_bytes: usize,
+    /// Pause downloads when free disk space drops below this (default 5GB).
+    pub min_free_bytes: u64,
+    /// Hard-stop harvesting at this total stored size (default 500GB; 0 = unlimited).
+    pub max_total_bytes: u64,
+    /// Quality gates applied after download+probe; failures are quarantined, not deleted.
+    pub min_duration_secs: u64,
+    pub max_duration_secs: u64,
+    pub min_bitrate_kbps: u32,
+    /// Concurrent downloads per host (archive.org and friends throttle hard).
+    pub per_host_concurrency: usize,
+}
+
+impl Default for MediaConfig {
+    fn default() -> Self {
+        Self {
+            store_dir: "./media_store".to_string(),
+            max_audio_size_bytes: 500 * 1024 * 1024,
+            min_free_bytes: 5 * 1024 * 1024 * 1024,
+            max_total_bytes: 0,
+            min_duration_secs: 30,
+            max_duration_secs: 1800,
+            min_bitrate_kbps: 96,
+            per_host_concurrency: 4,
         }
     }
 }

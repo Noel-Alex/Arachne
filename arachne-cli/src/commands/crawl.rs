@@ -100,6 +100,8 @@ pub async fn run(
             domain,
             depth: 0,
             priority: 100,
+            kind: Default::default(),
+            media: None,
         };
 
         nats.publish_task(&task).await?;

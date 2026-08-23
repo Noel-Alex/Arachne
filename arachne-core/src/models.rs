@@ -141,6 +141,56 @@ pub struct CrawlTask {
     pub domain: String,
     pub depth: u32,
     pub priority: i32,
+    /// What kind of resource this task targets; defaults to [`TaskKind::Page`]
+    /// so pre-existing serialized tasks decode unchanged.
+    #[serde(default)]
+    pub kind: TaskKind,
+    /// Source-adapter metadata carried through to the track manifest.
+    #[serde(default)]
+    pub media: Option<MediaMeta>,
+}
+
+/// The class of resource a task fetches. Drives worker dispatch:
+/// pages go through the HTML extraction pipeline, audio files through
+/// the streaming binary downloader.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TaskKind {
+    #[default]
+    Page,
+    AudioFile,
+}
+
+/// Provenance metadata attached to media download tasks by source adapters.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaMeta {
+    /// Stable identifier of this track within its source (e.g. Jamendo track id).
+    pub source_id: String,
+    /// Which adapter produced this task ("jamendo", "archive-org", "fma", ...).
+    pub source: String,
+    /// Collection/album within the source, if known.
+    pub collection: Option<String>,
+    /// License identifier (SPDX-ish: "cc-by-40", "cc-by-nc-40", "pd-us-mma", "unknown").
+    pub license: String,
+    /// Expected file title, from the source's own metadata.
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+}
+
+/// Technical + tagged audio properties measured by the worker's probe, carried
+/// back on the result so the coordinator can complete the track manifest
+/// without re-probing the file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaProbe {
+    pub duration_secs: f64,
+    pub bitrate_kbps: Option<i32>,
+    /// Normalized container/codec extension ("mp3", "flac", ...).
+    pub format: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<i32>,
+    pub genre: Option<String>,
 }
 
 /// Represents the result of crawling a URL.
@@ -158,6 +208,12 @@ pub struct CrawlResult {
     pub discovered_urls: Vec<DiscoveredUrl>,
     pub crawl_duration_ms: u64,
     pub crawled_at: DateTime<Utc>,
+    /// Populated when the fetched resource was an audio file.
+    #[serde(default)]
+    pub media_meta: Option<MediaMeta>,
+    /// Probe results for audio downloads (duration/bitrate/tags/format).
+    #[serde(default)]
+    pub media_probe: Option<MediaProbe>,
 }
 
 /// Represents a URL discovered during crawling.
@@ -175,6 +231,63 @@ pub struct DiscoveredUrlBatch {
     pub urls: Vec<DiscoveredUrl>,
 }
 
+/// Lifecycle of a track in the manifest (crash-recovery aware).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TrackStatus {
+    Pending,
+    Downloading,
+    Done,
+    Rejected,
+    Failed,
+}
+
+impl TrackStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Downloading => "downloading",
+            Self::Done => "done",
+            Self::Rejected => "rejected",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(s: &str) -> Self {
+        match s {
+            "downloading" => Self::Downloading,
+            "done" => Self::Done,
+            "rejected" => Self::Rejected,
+            "failed" => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+/// One row of the Sivana handoff manifest.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackRecord {
+    pub source: String,
+    pub source_id: String,
+    pub job_id: Uuid,
+    pub url: String,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub year: Option<i32>,
+    pub genre: Option<String>,
+    /// License identifier; mandatory for admission to the manifest.
+    pub license: String,
+    pub collection: Option<String>,
+    pub duration_secs: Option<f64>,
+    pub bitrate_kbps: Option<i32>,
+    pub format: Option<String>,
+    pub sha256: Option<String>,
+    pub bytes: Option<i64>,
+    pub object_path: Option<String>,
+    pub status: TrackStatus,
+    pub error: Option<String>,
+}
+
 /// Status of crawling a single URL.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum CrawlStatus {
@@ -185,6 +298,12 @@ pub enum CrawlStatus {
     ContentTooLarge,
     InvalidContentType,
     Timeout,
+    /// Downloaded file could not be probed as audio (corrupt or wrong magic bytes).
+    ProbeFailed,
+    /// File downloaded fine but rejected by quality gates (duration/bitrate bounds).
+    QualityRejected,
+    /// Downloaded content hash does not match expectation (e.g. FMA md5 check).
+    ChecksumMismatch,
 }
 
 impl CrawlStatus {
@@ -198,6 +317,9 @@ impl CrawlStatus {
             CrawlStatus::ContentTooLarge => -3,
             CrawlStatus::InvalidContentType => -4,
             CrawlStatus::Timeout => -5,
+            CrawlStatus::ProbeFailed => -6,
+            CrawlStatus::QualityRejected => -7,
+            CrawlStatus::ChecksumMismatch => -8,
         }
     }
 

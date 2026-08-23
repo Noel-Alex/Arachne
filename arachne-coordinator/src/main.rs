@@ -5,7 +5,7 @@ use arachne_core::{
     dedup::Deduplicator,
     domain, logging,
     metrics::CrawlerMetrics,
-    models::{CrawlJob, CrawlResult, CrawlTask, DiscoveredUrl},
+    models::{CrawlJob, CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl, TaskKind, TrackRecord, TrackStatus},
     nats::NatsManager,
 };
 use dashmap::DashMap;
@@ -135,6 +135,15 @@ async fn process_results(
                                             metrics.pages_failed.inc();
                                         }
 
+                                        // Audio tasks also complete the track manifest.
+                                        if result.media_meta.is_some()
+                                            && let Err(e) = complete_track_record(&repo, &result).await
+                                        {
+                                            error!("Failed to update track manifest: {:?}", e);
+                                            // Don't ack: redelivery will retry the manifest write.
+                                            continue;
+                                        }
+
                                         let domain_name = result.domain.clone().unwrap_or_else(|| "unknown".to_string());
                                         db_batch.push((domain_name, result));
                                         msgs_to_ack.push(msg);
@@ -147,17 +156,6 @@ async fn process_results(
                                 }
                             }
                         }
-
-                        if !db_batch.is_empty() {
-                            if let Err(e) = repo.insert_crawl_results_batch(&db_batch).await {
-                                error!("Failed to batch persist results to ScyllaDB: {:?}", e);
-                                // DO NOT ACK if DB insertion fails - allow NATS redelivery!
-                            } else {
-                                for msg in msgs_to_ack {
-                                    let _ = msg.ack().await;
-                                }
-                            }
-                        }
                     }
                     Err(e) => {
                         debug!("Result fetch timeout or error: {:?}", e);
@@ -167,6 +165,53 @@ async fn process_results(
             }
         }
     }
+}
+
+/// Transition the track manifest row for an audio result. The coordinator is
+/// the single writer for status transitions; workers only download. Rows are
+/// created on demand so results arriving before a manifest insert still land.
+async fn complete_track_record(repo: &ArachneRepo, result: &CrawlResult) -> Result<()> {
+    // The task's MediaMeta is the identity anchor (source, source_id, license).
+    let meta = match &result.media_meta {
+        Some(m) => m,
+        None => return Ok(()),
+    };
+
+    let status = match &result.status {
+        CrawlStatus::Success => TrackStatus::Done,
+        CrawlStatus::ProbeFailed | CrawlStatus::QualityRejected => TrackStatus::Rejected,
+        _ => TrackStatus::Failed,
+    };
+
+    let probe = result.media_probe.as_ref();
+    let record = TrackRecord {
+        source: meta.source.clone(),
+        source_id: meta.source_id.clone(),
+        job_id: result.job_id,
+        url: result.source_url.clone(),
+        title: result.title.clone().or_else(|| meta.title.clone()),
+        artist: probe.and_then(|p| p.artist.clone()).or_else(|| meta.artist.clone()),
+        album: probe.and_then(|p| p.album.clone()).or_else(|| meta.album.clone()),
+        year: probe.and_then(|p| p.year),
+        genre: probe.and_then(|p| p.genre.clone()),
+        license: meta.license.clone(),
+        collection: meta.collection.clone(),
+        duration_secs: probe.map(|p| p.duration_secs),
+        bitrate_kbps: probe.and_then(|p| p.bitrate_kbps),
+        format: probe.map(|p| p.format.clone()),
+        sha256: result.content_hash.clone().filter(|h| h.len() == 64),
+        bytes: result.content_length.map(|l| l as i64),
+        // Store the resolvable reference (file:// or object://) so consumers can locate audio.
+        object_path: result.content_ref.clone(),
+        status,
+        error: None,
+    };
+    let mut record = record;
+    if !result.status.is_success() {
+        record.error = Some(format!("{:?}", result.status));
+    }
+
+    repo.upsert_track(&record).await
 }
 
 /// Shared state for the discovery pipeline (admission control + dedup + dispatch).
@@ -320,6 +365,8 @@ async fn process_discovered_urls(
                                 domain: root_domain,
                                 depth: candidate.depth,
                                 priority: 1,
+                                kind: TaskKind::Page,
+                                media: None,
                             };
 
                             tasks_to_publish.push(task);

@@ -60,6 +60,8 @@ async fn main() -> Result<()> {
                     discovered_urls: vec![],
                     crawl_duration_ms: 45,
                     crawled_at: Utc::now(),
+                    media_meta: None,
+        media_probe: None,
                 };
 
                 batch.push((domain, result));

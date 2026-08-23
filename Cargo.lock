@@ -233,6 +233,7 @@ dependencies = [
  "chrono",
  "dashmap 6.2.1",
  "encoding_rs",
+ "fs4",
  "futures",
  "hex",
  "infer",

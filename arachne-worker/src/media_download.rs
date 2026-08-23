@@ -69,10 +69,26 @@ impl MediaContext {
     }
 
     async fn disk_budget_ok(&self) -> bool {
-        if self.config.media.max_total_bytes == 0 {
-            return true;
+        // Total-bytes cap (0 = unlimited).
+        if self.config.media.max_total_bytes > 0
+            && *self.total_bytes.lock().await >= self.config.media.max_total_bytes
+        {
+            return false;
         }
-        *self.total_bytes.lock().await < self.config.media.max_total_bytes
+
+        // Free-space floor: pause harvesting before we starve the OS/other
+        // processes of disk. Checked per-download; a single download can
+        // still overshoot up to max_audio_size_bytes.
+        match fs4::available_space(&self.config.media.store_dir) {
+            Ok(free) if free < self.config.media.min_free_bytes => false,
+            Ok(_) => true,
+            Err(e) => {
+                // Fail open: quota checks are advisory vs. losing all harvests
+                // on a transient stat error, but surface it loudly.
+                tracing::debug!("free-space check failed: {e}");
+                true
+            }
+        }
     }
 }
 

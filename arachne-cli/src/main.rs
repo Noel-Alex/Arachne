@@ -89,6 +89,11 @@ enum Commands {
         /// Don't respect robots.txt (not recommended)
         #[arg(long)]
         ignore_robots: bool,
+
+        /// License to attribute organically-discovered audio (e.g. "cc-by");
+        /// audio without a license and without this is never admitted
+        #[arg(long)]
+        default_license: Option<String>,
     },
 
     /// Check the status of crawl jobs
@@ -189,6 +194,7 @@ async fn main() -> Result<()> {
             store_html,
             store_text,
             ignore_robots,
+            default_license,
         } => {
             commands::crawl::run(
                 config,
@@ -205,6 +211,7 @@ async fn main() -> Result<()> {
                 store_html,
                 store_text,
                 ignore_robots,
+                default_license,
             )
             .await
         }

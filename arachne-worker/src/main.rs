@@ -330,6 +330,13 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     let (html_str, _, _) = encoding_rs::UTF_8.decode(&body_bytes);
     let extracted = extractor::extract_from_html(&html_str, &target_url);
 
+    // Audio-link discovery: direct audio URLs found on the page become
+    // AudioFile candidates (classified at admission by the coordinator).
+    let audio_links = arachne_core::discovery::audio_links::find_audio_links(
+        &html_str,
+        &target_url,
+    );
+
     let mut hasher = Sha256::new();
     hasher.update(&body_bytes);
     let content_hash = hex::encode(hasher.finalize());
@@ -366,8 +373,14 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
         None
     };
 
-    let discovered_urls: Vec<DiscoveredUrl> = extracted
-        .links
+    let mut all_links = extracted.links;
+    for audio in audio_links {
+        if !all_links.contains(&audio) {
+            all_links.push(audio);
+        }
+    }
+
+    let discovered_urls: Vec<DiscoveredUrl> = all_links
         .into_iter()
         .map(|link| DiscoveredUrl {
             url: link,

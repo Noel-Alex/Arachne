@@ -41,6 +41,7 @@ pub async fn run(
     store_html: bool,
     store_text: bool,
     ignore_robots: bool,
+    default_license: Option<String>,
 ) -> Result<()> {
     let nats = NatsManager::connect(&config.nats).await?;
     nats.ensure_streams().await?;
@@ -75,6 +76,7 @@ pub async fn run(
         topic_keywords: topic,
         store_raw_html: store_html,
         store_text,
+        default_license,
     };
 
     // Persist the job

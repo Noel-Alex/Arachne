@@ -214,6 +214,14 @@ async fn complete_track_record(repo: &ArachneRepo, result: &CrawlResult) -> Resu
     repo.upsert_track(&record).await
 }
 
+/// Stable content id for organically-discovered audio (no source adapter id).
+fn md5_of(s: &str) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    s.hash(&mut h);
+    h.finish()
+}
+
 /// Shared state for the discovery pipeline (admission control + dedup + dispatch).
 struct DiscoveryState {
     nats: Arc<NatsManager>,
@@ -359,14 +367,43 @@ async fn process_discovered_urls(
                             *domain_counts.entry(root_domain.clone()).or_insert(0) += 1;
                             *job_counts.entry(job_id).or_insert(0) += 1;
 
+                            // Organic audio discovery: extension-matched URLs
+                            // become AudioFile tasks licensed by the job's
+                            // default_license (if any). No license ⇒ no task.
+                            let is_audio =
+                                arachne_core::discovery::audio_links::has_audio_extension(&candidate.url);
+                            let (kind, media) = if is_audio {
+                                let license = jobs_cache.get(&job_id).as_deref().and_then(|j| j.as_ref()).and_then(|j| j.default_license.clone());
+                                match license {
+                                    Some(l) => (
+                                        TaskKind::AudioFile,
+                                        Some(arachne_core::models::MediaMeta {
+                                            source_id: format!("{:x}", md5_of(&candidate.url)),
+                                            source: "discovered".into(),
+                                            collection: None,
+                                            license: l,
+                                            title: None,
+                                            artist: None,
+                                            album: None,
+                                        }),
+                                    ),
+                                    None => {
+                                        debug!(url = %candidate.url, "audio URL without default_license; skipping");
+                                        continue;
+                                    }
+                                }
+                            } else {
+                                (TaskKind::Page, None)
+                            };
+
                             let task = CrawlTask {
                                 url: candidate.url,
                                 job_id: candidate.job_id,
                                 domain: root_domain,
                                 depth: candidate.depth,
                                 priority: 1,
-                                kind: TaskKind::Page,
-                                media: None,
+                                kind,
+                                media,
                             };
 
                             tasks_to_publish.push(task);

@@ -48,6 +48,11 @@ pub struct CrawlJob {
     pub topic_keywords: Option<Vec<String>>,
     pub store_raw_html: bool,
     pub store_text: bool,
+    /// License applied to audio files discovered organically (no adapter
+    /// metadata) during this job. Audio found without a license AND without
+    /// this default is never admitted to the manifest.
+    #[serde(default)]
+    pub default_license: Option<String>,
 }
 
 impl CrawlJob {
@@ -119,6 +124,7 @@ impl Default for CrawlJob {
             topic_keywords: None,
             store_raw_html: false,
             store_text: true,
+            default_license: None,
         }
     }
 }

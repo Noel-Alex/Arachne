@@ -12,6 +12,8 @@ struct CachedRobots {
     raw_txt: Arc<Vec<u8>>,
     fetched_at: Instant,
     crawl_delay: Option<Duration>,
+    /// Absolute sitemap URLs declared via `Sitemap:` lines.
+    sitemaps: Arc<Vec<String>>,
 }
 
 /// Manages fetching, caching, and querying robots.txt files.
@@ -66,6 +68,28 @@ impl RobotsManager {
         cached.and_then(|r| r.crawl_delay)
     }
 
+    /// Sitemap URLs declared in the domain's robots.txt (`Sitemap:` lines).
+    /// Resolved against the host so relative declarations work.
+    pub async fn get_sitemaps(&self, url: &Url) -> Vec<String> {
+        if url.authority().is_empty() {
+            return Vec::new();
+        }
+        let authority = url.authority().to_string();
+        self.fetch_robots(url, &authority)
+            .await
+            .map(|r| r.sitemaps.to_vec())
+            .unwrap_or_default()
+    }
+
+    fn empty_entry() -> CachedRobots {
+        CachedRobots {
+            raw_txt: Arc::new(Vec::new()),
+            fetched_at: Instant::now(),
+            crawl_delay: None,
+            sitemaps: Arc::new(Vec::new()),
+        }
+    }
+
     async fn fetch_robots(&self, url: &Url, authority: &str) -> Option<CachedRobots> {
         let cache_key = format!("{}://{}", url.scheme(), authority);
 
@@ -81,10 +105,12 @@ impl RobotsManager {
                 if let Ok(body) = res.bytes().await {
                     let bytes = body.to_vec();
                     let delay_ms = parse_crawl_delay(&bytes);
+                    let sitemaps = parse_sitemaps(&bytes, url);
                     let cached = CachedRobots {
                         raw_txt: Arc::new(bytes),
                         fetched_at: Instant::now(),
                         crawl_delay: delay_ms.map(Duration::from_millis),
+                        sitemaps: Arc::new(sitemaps),
                     };
 
                     self.cache.insert(cache_key, cached.clone());
@@ -100,14 +126,31 @@ impl RobotsManager {
         }
 
         // Cache permissive empty fallback to avoid hammering 404/500 endpoints repeatedly
-        let empty_cached = CachedRobots {
-            raw_txt: Arc::new(Vec::new()),
-            fetched_at: Instant::now(),
-            crawl_delay: None,
-        };
+        let empty_cached = Self::empty_entry();
         self.cache.insert(cache_key, empty_cached.clone());
         Some(empty_cached)
     }
+}
+
+/// Extract absolute `Sitemap:` URLs from a robots.txt body. Relative values
+/// are resolved against the robots.txt origin.
+fn parse_sitemaps(body: &[u8], base: &Url) -> Vec<String> {
+    let txt = match std::str::from_utf8(body) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    txt.lines()
+        .filter_map(|line| {
+            let line = line.trim();
+            let value = line.to_lowercase().starts_with("sitemap:").then(|| {
+                line["sitemap:".len()..].trim().to_string()
+            })?;
+            Url::parse(&value)
+                .or_else(|_| base.join(&value))
+                .map(|u| u.to_string())
+                .ok()
+        })
+        .collect()
 }
 
 /// Helper function to parse Crawl-delay from robots.txt body.
@@ -124,4 +167,28 @@ fn parse_crawl_delay(body: &[u8]) -> Option<u64> {
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn extracts_and_resolves_sitemap_lines() {
+        let body = b"User-agent: *\nDisallow: /private\n\nSitemap: https://ex.com/sitemap.xml\nsitemap: /relative-map.xml";
+        let base = Url::parse("https://ex.com/robots.txt").unwrap();
+        assert_eq!(
+            parse_sitemaps(body, &base),
+            vec![
+                "https://ex.com/sitemap.xml".to_string(),
+                "https://ex.com/relative-map.xml".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn no_sitemaps_means_empty() {
+        let base = Url::parse("https://ex.com/robots.txt").unwrap();
+        assert_eq!(parse_sitemaps(b"User-agent: *\n", &base), Vec::<String>::new());
+    }
 }

@@ -117,6 +117,25 @@ enum Commands {
         output: String,
     },
 
+    /// Harvest audio from a legal source (enumerate catalog → queue downloads)
+    Harvest {
+        /// Source adapter: "jamendo" or "archive-org"
+        #[arg(short, long)]
+        source: String,
+
+        /// Cap on newly-admitted tracks (jamendo) or items scanned (archive-org)
+        #[arg(long)]
+        limit: Option<u64>,
+
+        /// Jamendo API client_id (or set JAMENDO_CLIENT_ID)
+        #[arg(long)]
+        jamendo_client_id: Option<String>,
+
+        /// Contact address for the User-Agent (required by archive.org policy)
+        #[arg(long)]
+        contact: Option<String>,
+    },
+
     /// Export the track manifest for a source as a Sivana handoff snapshot
     TracksExport {
         /// Source adapter name (e.g. "jamendo", "archive-org")
@@ -196,6 +215,14 @@ async fn main() -> Result<()> {
             format,
             output,
         } => commands::export::run(config, job_id, domain, format, output).await,
+        Commands::Harvest {
+            source,
+            limit,
+            jamendo_client_id,
+            contact,
+        } => {
+            commands::harvest::run(config, source, limit, jamendo_client_id, contact).await
+        }
         Commands::TracksExport {
             source,
             output,

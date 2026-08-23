@@ -85,6 +85,10 @@ bytes = "1.9"
 # Handoff snapshot compression
 zstd = "0.13"
 
+# FMA dataset ingestion (tracks.csv inside fma_metadata.zip)
+csv = "1.3"
+zip = { version = "2.2", default-features = false, features = ["deflate"] }
+
 # robots.txt
 texting_robots = "0.2"
 

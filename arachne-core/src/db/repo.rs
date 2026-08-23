@@ -375,7 +375,7 @@ impl ArachneRepo {
         let now = Utc::now().timestamp_millis();
         self.session
             .query(
-                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     &t.source,
                     &t.source_id,
@@ -388,6 +388,7 @@ impl ArachneRepo {
                     &t.genre,
                     &t.license,
                     &t.collection,
+                    t.status.as_str(),
                 ),
             )
             .await?;
@@ -411,6 +412,42 @@ impl ArachneRepo {
             )
             .await?;
         Ok(())
+    }
+
+    /// Manifest-first admission: insert a pending row only if this
+    /// (source, source_id) is unknown. Returns false when the track already
+    /// exists (any status), so re-running a harvest never resets progress.
+    pub async fn insert_track_if_absent(&self, t: &TrackRecord) -> Result<bool> {
+        let now = Utc::now().timestamp_millis();
+        let res = self
+            .session
+            .query(
+                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS",
+                (
+                    &t.source,
+                    &t.source_id,
+                    t.job_id,
+                    &t.url,
+                    &t.title,
+                    &t.artist,
+                    &t.album,
+                    &t.year,
+                    &t.genre,
+                    &t.license,
+                    &t.collection,
+                    t.status.as_str(),
+                    now,
+                ),
+            )
+            .await?;
+
+        // LWT responses carry a single [applied] boolean row.
+        let mut res = res;
+        let applied = match res.rows.take().as_mut().and_then(Vec::pop) {
+            Some(row) => row.into_typed::<(bool,)>().map(|(a,)| a).unwrap_or(true),
+            None => true,
+        };
+        Ok(applied)
     }
 
     /// Claim pending/expired-lease tracks for download. `lease_ms` is how long

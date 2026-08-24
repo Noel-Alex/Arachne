@@ -1,8 +1,9 @@
 //! URL discovery beyond `<a href>`: sitemaps, feeds with enclosures,
-//! and generic HTML audio-link detection.
+//! and generic HTML media-link detection (audio, video, documents).
 
 pub mod audio_links;
 pub mod feeds;
+pub mod media_links;
 pub mod sitemap;
 
 pub use feeds::{parse_feed, FeedEntry};

@@ -414,23 +414,34 @@ async fn process_discovered_urls(
                             *domain_counts.entry(root_domain.clone()).or_insert(0) += 1;
                             *job_counts.entry(job_id).or_insert(0) += 1;
 
-                            // Organic audio discovery: extension-matched URLs
-                            // become AudioFile tasks licensed by the job's
+                            // Organic media discovery: extension-matched URLs
+                            // become media tasks licensed by the job's
                             // default_license (if any). No license ⇒ no task.
                             let is_audio =
                                 arachne_core::discovery::audio_links::has_audio_extension(&candidate.url);
-                            let (kind, media) = if is_audio {
+                            let is_media = is_audio
+                                || arachne_core::discovery::media_links::has_video_extension(&candidate.url)
+                                || arachne_core::discovery::media_links::has_document_extension(&candidate.url);
+                            let (kind, media) = if is_media {
                                 let license = jobs_cache.get(&job_id).and_then(|e| e.0.as_ref().cloned()).and_then(|j| j.default_license.clone());
                                 match license {
-                                    Some(l) => (
-                                        TaskKind::AudioFile,
+                                    Some(l) => {
+                                        let media_kind = if is_audio {
+                                            TaskKind::AudioFile
+                                        } else if arachne_core::discovery::media_links::has_video_extension(&candidate.url) {
+                                            TaskKind::VideoFile
+                                        } else {
+                                            TaskKind::DocumentFile
+                                        };
+                                        (
+                                        media_kind,
                                         Some(arachne_core::models::MediaMeta {
                                             source_id: format!("{:x}", md5_of(&candidate.url)),
                                             source: "discovered".into(),
                                             collection: None,
                                             license: l,
                                             // Provenance: remember the page that
-                                            // linked this audio so every stored
+                                            // linked this media so every stored
                                             // file traces back to its origin.
                                             origin_page_url: Some(candidate.source_url.clone()),
                                             license_url: None,
@@ -439,9 +450,10 @@ async fn process_discovered_urls(
                                             artist: None,
                                             album: None,
                                         }),
-                                    ),
+                                    )
+                                    }
                                     None => {
-                                        debug!(url = %candidate.url, "audio URL without default_license; skipping");
+                                        debug!(url = %candidate.url, "media URL without default_license; skipping");
                                         continue;
                                     }
                                 }

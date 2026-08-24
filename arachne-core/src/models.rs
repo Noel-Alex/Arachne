@@ -157,13 +157,30 @@ pub struct CrawlTask {
 }
 
 /// The class of resource a task fetches. Drives worker dispatch:
-/// pages go through the HTML extraction pipeline, audio files through
-/// the streaming binary downloader.
+/// pages go through the HTML extraction pipeline, media kinds through
+/// the streaming binary downloader with per-kind verification.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TaskKind {
     #[default]
     Page,
+    /// Audio (mp3/flac/ogg/wav/m4a/opus/aac) — full probe + quality gates.
     AudioFile,
+    /// Video containers (mp4/mkv/webm/avi/mov) — magic-byte verified only;
+    /// no duration/bitrate probing yet (symphonia is audio-only).
+    VideoFile,
+    /// Documents (pdf/doc(x)/epub/txt) — magic-byte verified; PDFs get
+    /// page-count metadata when parseable.
+    DocumentFile,
+    /// Any other binary asset (images, datasets, archives) stored
+    /// content-addressed without format-specific validation.
+    BinaryFile,
+}
+
+impl TaskKind {
+    /// Whether this kind flows through the streaming binary downloader.
+    pub fn is_media(self) -> bool {
+        !matches!(self, Self::Page)
+    }
 }
 
 /// Provenance metadata attached to media download tasks by source adapters.

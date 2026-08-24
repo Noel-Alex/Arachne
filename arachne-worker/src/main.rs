@@ -6,14 +6,14 @@ use arachne_core::{
     content::{extractor, filter},
     domain, logging,
     metrics::{self, CrawlerMetrics},
-    models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl, TaskKind},
+    models::{CrawlResult, CrawlStatus, CrawlTask, DiscoveredUrl},
     nats::NatsManager,
     politeness::PolitenessLimiter,
     robots::RobotsManager,
 };
 use chrono::Utc;
 use futures::StreamExt;
-use media_download::{harvest_audio, MediaContext};
+use media_download::{harvest_media, MediaContext};
 use reqwest::Client;
 use sha2::{Digest, Sha256};
 use std::path::PathBuf;
@@ -201,8 +201,8 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     };
 
     // Media tasks take the streaming binary download path.
-    if task.kind == TaskKind::AudioFile {
-        return process_audio_task(ctx, task).await;
+    if task.kind.is_media() {
+        return process_media_task(ctx, task).await;
     }
 
     let domain = domain::extract_root_domain(&task.url).unwrap_or_else(|| "unknown".to_string());
@@ -330,12 +330,26 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     let (html_str, _, _) = encoding_rs::UTF_8.decode(&body_bytes);
     let extracted = extractor::extract_from_html(&html_str, &target_url);
 
-    // Audio-link discovery: direct audio URLs found on the page become
-    // AudioFile candidates (classified at admission by the coordinator).
-    let audio_links = arachne_core::discovery::audio_links::find_audio_links(
+    // Media-link discovery: audio/video/document URLs found on the page
+    // become media candidates (classified at admission by the coordinator).
+    let mut audio_links = arachne_core::discovery::audio_links::find_audio_links(
         &html_str,
         &target_url,
     );
+    for video in arachne_core::discovery::media_links::links_by_extension(
+        &html_str,
+        &target_url,
+        arachne_core::discovery::media_links::has_video_extension,
+    ) {
+        audio_links.push(video);
+    }
+    for doc in arachne_core::discovery::media_links::links_by_extension(
+        &html_str,
+        &target_url,
+        arachne_core::discovery::media_links::has_document_extension,
+    ) {
+        audio_links.push(doc);
+    }
 
     let mut hasher = Sha256::new();
     hasher.update(&body_bytes);
@@ -434,7 +448,7 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     true
 }
 
-async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
+async fn process_media_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     let start_time = Instant::now();
     let domain = domain::extract_root_domain(&task.url).unwrap_or_else(|| "unknown".to_string());
     let target_url = match Url::parse(&task.url) {
@@ -462,7 +476,7 @@ async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     }
     ctx.politeness.wait_for_permission(&domain).await;
 
-    let outcome = harvest_audio(&ctx.media, &ctx.http_client, &task).await;
+    let outcome = harvest_media(&ctx.media, &ctx.http_client, &task).await;
 
     // Classify for metrics + always log the terminal state (a silent
     // download is indistinguishable from a hung one when watching logs).

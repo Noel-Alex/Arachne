@@ -14,7 +14,7 @@ use arachne_core::config::ArachneConfig;
 use arachne_core::fsutil::rename_with_retry;
 use arachne_core::media::store::{MediaObject, StoredMedia};
 use arachne_core::media::{probe_audio, AudioQuality, MediaStore};
-use arachne_core::models::{CrawlStatus, CrawlTask};
+use arachne_core::models::{CrawlStatus, CrawlTask, TaskKind};
 use bytes::Bytes;
 use futures::StreamExt;
 use sha2::{Digest, Sha256};
@@ -104,7 +104,7 @@ pub struct DownloadOutcome {
 }
 
 /// Entry point: download + verify + probe an AudioFile task.
-pub async fn harvest_audio(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask) -> DownloadOutcome {
+pub async fn harvest_media(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask) -> DownloadOutcome {
     match run(ctx, client, task).await {
         Ok(o) => o,
         Err(e) => DownloadOutcome {
@@ -320,25 +320,14 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
 
     let content_hash = hex::encode(hasher.finalize());
 
-    // Magic-byte sniff: reject HTML error pages saved with .mp3 names.
+    // Magic-byte sniff: reject HTML error pages saved with media names.
+    // Acceptance depends on the requested TaskKind — audio tasks demand
+    // audio magic bytes, video demands video, documents documents; BinaryFile
+    // accepts anything infer recognizes.
     let head = read_head(&part_path, 4100).await?;
-    if let Some(kind) = infer::get(&head) {
-        let ext_ok = matches!(
-            kind.mime_type(),
-            "audio/mpeg"
-                | "audio/flac"
-                | "audio/x-flac"
-                | "audio/ogg"
-                | "application/ogg"
-                | "audio/wav"
-                | "audio/x-wav"
-                | "audio/vnd.wave"
-                | "audio/x-m4a"
-                | "video/mp4"
-                | "audio/aac"
-                | "audio/x-opus"
-        );
-        if !ext_ok {
+    match verify_magic_bytes(task.kind, &head) {
+        Ok(format_ext) => format_ext,
+        Err(reason) => {
             quarantine(&ctx.config, &part_path, "wrong-magic-bytes").await;
             return Ok(DownloadOutcome {
                 status: CrawlStatus::ProbeFailed,
@@ -346,22 +335,17 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
                 probe: None,
                 format: None,
                 bytes: written,
-                error: Some(format!("magic bytes say {}", kind.mime_type())),
+                error: Some(reason),
             });
         }
-    } else {
-        quarantine(&ctx.config, &part_path, "unknown-format").await;
-        return Ok(DownloadOutcome {
-            status: CrawlStatus::ProbeFailed,
-            stored: None,
-            probe: None,
-            format: None,
-            bytes: written,
-            error: Some("unrecognized magic bytes".into()),
-        });
+    };
+
+    // Probe + quality gates (audio only for now).
+    if task.kind != TaskKind::AudioFile {
+        // Non-audio media: verified + committed, no deep probe yet.
+        return commit_stored(ctx, task, &part_path, &content_hash, written, start).await;
     }
 
-    // Probe + quality gates.
     let quality = AudioQuality {
         min_duration_secs: ctx.config.media.min_duration_secs,
         max_duration_secs: ctx.config.media.max_duration_secs,
@@ -411,27 +395,115 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         });
     }
 
-    // Commit content-addressed.
+    // Commit content-addressed (shared with all media kinds), then attach the
+    // audio probe to the outcome.
+    let mut outcome = commit_stored(ctx, task, &part_path, &content_hash, written, start).await?;
+    outcome.probe = Some(probe);
+    Ok(outcome)
+}
+
+/// Validate sniffed magic bytes against the requested media kind.
+/// Returns the normalized extension on success, a rejection reason on failure.
+fn verify_magic_bytes(kind: TaskKind, head: &[u8]) -> Result<String, String> {
+    const AUDIO_MIMES: &[&str] = &[
+        "audio/mpeg",
+        "audio/flac",
+        "audio/x-flac",
+        "audio/ogg",
+        "application/ogg",
+        "audio/wav",
+        "audio/x-wav",
+        "audio/vnd.wave",
+        "audio/x-m4a",
+        "video/mp4", // m4a sniffs as video/mp4 (same ISO-BMFF container)
+        "audio/aac",
+        "audio/x-opus",
+    ];
+    const VIDEO_MIMES: &[&str] = &[
+        "video/mp4",
+        "video/x-m4v",
+        "video/webm",
+        "video/x-matroska",
+        "video/quicktime",
+        "video/x-msvideo",
+        "audio/x-m4a", // m4v/m4a ambiguity — accept, extension disambiguates
+    ];
+    const DOCUMENT_MIMES: &[&str] = &["application/pdf", "application/zip", "application/x-ole-storage", "application/vnd.openxmlformats-officedocument"];
+
+    let Some(info) = infer::get(head) else {
+        // BinaryFile accepts opaque blobs; every other kind needs recognition.
+        if kind == TaskKind::BinaryFile {
+            return Ok("bin".to_string());
+        }
+        return Err("unrecognized magic bytes".to_string());
+    };
+
+    let mime = info.mime_type();
+    let accepted = match kind {
+        TaskKind::AudioFile => AUDIO_MIMES.contains(&mime),
+        TaskKind::VideoFile => VIDEO_MIMES.contains(&mime),
+        TaskKind::DocumentFile => {
+            DOCUMENT_MIMES.iter().any(|d| mime.starts_with(d))
+                || matches!(mime, "application/pdf" | "application/epub+zip" | "application/zip" | "application/x-mobipocket-ebook" | "text/plain")
+        }
+        TaskKind::BinaryFile | TaskKind::Page => true,
+    };
+    if !accepted {
+        return Err(format!("magic bytes say {mime}, expected {:?}", kind));
+    }
+    Ok(normalized_extension(mime, info.extension()))
+}
+
+/// Map a sniffed mime to our canonical extension token.
+fn normalized_extension(mime: &str, fallback_ext: &str) -> String {
+    match mime {
+        "audio/mpeg" => "mp3".into(),
+        "audio/flac" | "audio/x-flac" => "flac".into(),
+        "audio/ogg" | "application/ogg" | "audio/x-opus" => "ogg".into(),
+        "audio/wav" | "audio/x-wav" | "audio/vnd.wave" => "wav".into(),
+        "audio/x-m4a" | "video/mp4" if false => unreachable!(),
+        _ => infer_fallback(fallback_ext),
+    }
+}
+
+/// Second-stage mapping that distinguishes m4a from mp4 by kind context is
+/// handled by callers; this just normalizes known tokens and passes the rest.
+fn infer_fallback(ext: &str) -> String {
+    match ext {
+        "jpg" => "jpg".into(),
+        other => other.to_ascii_lowercase(),
+    }
+}
+
+/// Commit a verified download: content-addressed store + outcome assembly
+/// shared by all media kinds.
+async fn commit_stored(
+    ctx: &Arc<MediaContext>,
+    task: &CrawlTask,
+    part_path: &std::path::Path,
+    content_hash: &str,
+    written: u64,
+    start: std::time::Instant,
+) -> Result<DownloadOutcome> {
     let meta = task.media.clone();
+    let head = read_head(part_path, 4100).await?;
     let extension = extension_for(task, &head);
     let obj = MediaObject {
-        source: meta.as_ref().map(|m| m.source.clone()).unwrap_or_else(|| host.clone()),
+        source: meta.as_ref().map(|m| m.source.clone()).unwrap_or_else(|| "unknown".into()),
         collection: meta.as_ref().and_then(|m| m.collection.clone()),
-        sha256: content_hash.clone(),
+        sha256: content_hash.to_string(),
         extension: extension.clone(),
     };
 
-    // Commit content-addressed; if identical content already exists, resolve
-    // its canonical paths so the manifest still points at a real file.
-    // Commit streams from disk in chunks — never buffers the whole file.
+    // Commit content-addressed; dedup resolves existing content's real paths.
     let stored = match ctx.store.lookup(&obj).await? {
         Some(existing) => {
-            cleanup(&part_path).await;
+            cleanup(part_path).await;
             existing
         }
         None => {
-            let stored = ctx.store.put_stream(&obj, &part_path).await?;
-            cleanup(&part_path).await;
+            let stored = ctx.store.put_stream(&obj, part_path).await?;
+            cleanup(part_path).await;
             stored
         }
     };
@@ -444,16 +516,15 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         url = %task.url,
         hash = %content_hash,
         bytes = written,
-        duration_s = probe.duration_secs,
         elapsed_ms = start.elapsed().as_millis() as u64,
-        "audio harvested"
+        "media harvested"
     );
 
     Ok(DownloadOutcome {
         status: CrawlStatus::Success,
         stored: Some(stored),
+        probe: None,
         format: Some(extension),
-        probe: Some(probe),
         bytes: written,
         error: None,
     })
@@ -635,7 +706,7 @@ mod tests {
 
         let ctx = test_context(&dir).await;
         let client = reqwest::Client::new();
-        let outcome = harvest_audio(&ctx, &client, &task_for(&url)).await;
+        let outcome = harvest_media(&ctx, &client, &task_for(&url)).await;
 
         assert!(
             matches!(outcome.status, CrawlStatus::Success),
@@ -675,12 +746,12 @@ mod tests {
         let client = reqwest::Client::new();
 
         let (url1, s1) = spawn_one_shot_server(body.clone()).await;
-        let first = harvest_audio(&ctx, &client, &task_for(&url1)).await;
+        let first = harvest_media(&ctx, &client, &task_for(&url1)).await;
         assert!(matches!(first.status, CrawlStatus::Success), "{first:?}");
         let first_path = first.stored.as_ref().unwrap().fs_path.clone().unwrap();
 
         let (url2, s2) = spawn_one_shot_server(body).await; // same bytes, different URL
-        let second = harvest_audio(&ctx, &client, &task_for(&url2)).await;
+        let second = harvest_media(&ctx, &client, &task_for(&url2)).await;
         assert!(
             matches!(second.status, CrawlStatus::Success),
             "dedup must still succeed: {second:?}"

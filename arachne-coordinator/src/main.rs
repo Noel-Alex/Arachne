@@ -9,6 +9,7 @@ use arachne_core::{
     nats::NatsManager,
 };
 use dashmap::DashMap;
+use std::time::{Duration, Instant};
 use futures::StreamExt;
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -55,7 +56,8 @@ async fn main() -> Result<()> {
 
     let domain_counts = Arc::new(DashMap::<String, i64>::new());
     let job_counts = Arc::new(DashMap::<Uuid, u64>::new());
-    let jobs_cache = Arc::new(DashMap::<Uuid, Option<CrawlJob>>::new());
+    let jobs_cache: Arc<DashMap<Uuid, (Option<CrawlJob>, Instant)>> = Arc::new(DashMap::new());
+    let job_cache_ttl = Duration::from_secs(60);
 
     let max_pages_per_domain = config.coordinator.max_pages_per_domain;
     let batch_size = config.coordinator.batch_size;
@@ -79,6 +81,7 @@ async fn main() -> Result<()> {
             domain_counts: Arc::clone(&domain_counts),
             job_counts: Arc::clone(&job_counts),
             jobs_cache: Arc::clone(&jobs_cache),
+            job_cache_ttl,
             metrics: Arc::clone(&metrics),
             max_pages_per_domain,
         },
@@ -148,11 +151,30 @@ async fn process_results(
                                         db_batch.push((domain_name, result));
                                         msgs_to_ack.push(msg);
                                     } else {
+                                        // Poison pill: undecodable payloads are
+                                        // acked (infinite redelivery helps no
+                                        // one) but loudly counted + logged.
+                                        metrics.messages_malformed.inc();
+                                        warn!(
+                                            bytes = msg.payload.len(),
+                                            "undecodable crawl result dropped"
+                                        );
                                         let _ = msg.ack().await;
                                     }
                                 }
                                 Err(e) => {
                                     warn!("Error consuming from result stream: {:?}", e);
+                                }
+                            }
+                        }
+
+                        if !db_batch.is_empty() {
+                            if let Err(e) = repo.insert_crawl_results_batch(&db_batch).await {
+                                error!("Failed to batch persist results to ScyllaDB: {:?}", e);
+                                // DO NOT ACK if DB insertion fails - allow NATS redelivery!
+                            } else {
+                                for msg in msgs_to_ack {
+                                    let _ = msg.ack().await;
                                 }
                             }
                         }
@@ -195,6 +217,9 @@ async fn complete_track_record(repo: &ArachneRepo, result: &CrawlResult) -> Resu
         year: probe.and_then(|p| p.year),
         genre: probe.and_then(|p| p.genre.clone()),
         license: meta.license.clone(),
+        license_url: meta.license_url.clone(),
+        origin_page_url: meta.origin_page_url.clone(),
+        discovered_from_url: meta.discovered_from_url.clone(),
         collection: meta.collection.clone(),
         duration_secs: probe.map(|p| p.duration_secs),
         bitrate_kbps: probe.and_then(|p| p.bitrate_kbps),
@@ -229,7 +254,10 @@ struct DiscoveryState {
     deduplicator: Arc<Deduplicator>,
     domain_counts: Arc<DashMap<String, i64>>,
     job_counts: Arc<DashMap<Uuid, u64>>,
-    jobs_cache: Arc<DashMap<Uuid, Option<CrawlJob>>>,
+    jobs_cache: Arc<DashMap<Uuid, (Option<CrawlJob>, Instant)>>,
+    /// How long a cached job row is trusted before re-reading from the DB.
+    /// Keeps pause/cancel responsive without a DB hit per URL.
+    job_cache_ttl: Duration,
     metrics: Arc<CrawlerMetrics>,
     max_pages_per_domain: i64,
 }
@@ -246,6 +274,7 @@ async fn process_discovered_urls(
         domain_counts,
         job_counts,
         jobs_cache,
+        job_cache_ttl,
         metrics,
         max_pages_per_domain,
     } = state;
@@ -284,6 +313,11 @@ async fn process_discovered_urls(
                                         candidates.push(url_msg);
                                         raw_msgs.push(msg);
                                     } else {
+                                        metrics.messages_malformed.inc();
+                                        warn!(
+                                            bytes = msg.payload.len(),
+                                            "undecodable discovered-URL message dropped"
+                                        );
                                         let _ = msg.ack().await;
                                     }
                                 }
@@ -311,18 +345,31 @@ async fn process_discovered_urls(
                             let root_domain = domain::extract_root_domain(&normalized_url)
                                 .unwrap_or_else(|| "unknown".to_string());
 
-                            // Check job policy
+                            // Check job policy. Cache entries carry a TTL so
+                            // pause/cancel status flips propagate without a
+                            // per-URL DB read.
                             let job_id = candidate.job_id;
-                            if !jobs_cache.contains_key(&job_id) {
+                            let needs_load = match jobs_cache.get(&job_id) {
+                                Some(entry) => entry.1.elapsed() >= job_cache_ttl,
+                                None => true,
+                            };
+                            if needs_load {
                                 let loaded = repo.get_job(&job_id).await.ok().flatten();
-                                jobs_cache.insert(job_id, loaded);
+                                jobs_cache.insert(job_id, (loaded, Instant::now()));
                             }
 
-                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref()
-                                && !job.is_url_allowed(&normalized_url, candidate.depth, &root_domain) {
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).map(|e| e.0.clone()) {
+                                // Terminal/paused jobs admit nothing new.
+                                if !matches!(job.status, arachne_core::models::JobStatus::Running | arachne_core::models::JobStatus::Pending)
+                                {
+                                    debug!(job_id = %job_id, "job not running; skipping admission");
+                                    continue;
+                                }
+                                if !job.is_url_allowed(&normalized_url, candidate.depth, &root_domain) {
                                     debug!(url = %normalized_url, "URL disallowed by job crawl policy");
                                     continue;
                                 }
+                            }
 
                             db_checks.push((root_domain.clone(), job_id, normalized_url.clone()));
 
@@ -355,7 +402,7 @@ async fn process_discovered_urls(
                             }
 
                             let job_id = candidate.job_id;
-                            if let Some(Some(job)) = jobs_cache.get(&job_id).as_deref()
+                            if let Some(Some(job)) = jobs_cache.get(&job_id).map(|e| e.0.clone())
                                 && let Some(limit) = job.max_pages {
                                     let current_job_count = *job_counts.entry(job_id).or_insert(0);
                                     if current_job_count >= limit {
@@ -373,7 +420,7 @@ async fn process_discovered_urls(
                             let is_audio =
                                 arachne_core::discovery::audio_links::has_audio_extension(&candidate.url);
                             let (kind, media) = if is_audio {
-                                let license = jobs_cache.get(&job_id).as_deref().and_then(|j| j.as_ref()).and_then(|j| j.default_license.clone());
+                                let license = jobs_cache.get(&job_id).and_then(|e| e.0.as_ref().cloned()).and_then(|j| j.default_license.clone());
                                 match license {
                                     Some(l) => (
                                         TaskKind::AudioFile,
@@ -382,6 +429,12 @@ async fn process_discovered_urls(
                                             source: "discovered".into(),
                                             collection: None,
                                             license: l,
+                                            // Provenance: remember the page that
+                                            // linked this audio so every stored
+                                            // file traces back to its origin.
+                                            origin_page_url: Some(candidate.source_url.clone()),
+                                            license_url: None,
+                                            discovered_from_url: Some(candidate.source_url.clone()),
                                             title: None,
                                             artist: None,
                                             album: None,

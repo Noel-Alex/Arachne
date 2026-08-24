@@ -134,23 +134,97 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         });
     }
 
-    // Staging file keyed by URL hash so concurrent/consumed tasks don't collide.
+    // Staging file keyed by URL hash so crash restarts can RESUME. Redelivery
+    // while an original is still downloading must not stomp it, so we take an
+    // exclusive OS file lock; a contended lock means "someone else is mid-
+    // flight" and we fall back to a private nonce-suffixed file (no resume,
+    // but never shared bytes). Cross-attempt dedup happens at the store.
     let staging_key: String = {
         let mut h = Sha256::new();
         h.update(task.url.as_bytes());
         hex::encode(h.finalize())[..24].to_string()
     };
-    let part_path = PathBuf::from(&ctx.config.media.store_dir)
+    let attempt_nonce: u32 = std::process::id() as u32 ^ uuid::Uuid::new_v4().as_u128() as u32;
+    let primary_part = PathBuf::from(&ctx.config.media.store_dir)
         .join("parts")
         .join(format!("{staging_key}.part"));
-    tokio::fs::create_dir_all(part_path.parent().unwrap()).await?;
+    let fallback_part = PathBuf::from(&ctx.config.media.store_dir)
+        .join("parts")
+        .join(format!("{staging_key}-{attempt_nonce:08x}.part"));
+
+    // Try to own the primary .part exclusively. On success we WRITE THROUGH
+    // this same handle (reopening would collide with our own lock on
+    // Windows); on contention we fall back to a private nonce-suffixed file
+    // (no resume, but never shared bytes). Cross-attempt dedup happens at the
+    // content-addressed store.
+    use fs4::tokio::AsyncFileExt as _;
+    tokio::fs::create_dir_all(primary_part.parent().unwrap()).await?;
+    let part_lock_holder = tokio::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false) // never clobber a resumable prefix
+        .write(true)
+        .read(true)
+        .open(&primary_part)
+        .await?;
+
+    enum Staging {
+        /// Locked primary handle — resume + exclusive ownership.
+        Owned {
+            path: PathBuf,
+            file: tokio::fs::File,
+            resumed_len: u64,
+        },
+        /// Private fallback path (fresh download).
+        Fallback { path: PathBuf },
+    }
+
+    let staging = match part_lock_holder.try_lock_exclusive() {
+        Ok(()) => {
+            // Lock methods take &self, so ownership stays with our binding.
+            let resumed_len = part_lock_holder
+                .metadata()
+                .await
+                .map(|m| m.len())
+                .unwrap_or(0);
+            Staging::Owned {
+                path: primary_part,
+                file: part_lock_holder,
+                resumed_len,
+            }
+        }
+        Err(_) => {
+            tracing::debug!(
+                url = %task.url,
+                "staging file locked by in-flight download; using private .part"
+            );
+            Staging::Fallback { path: fallback_part }
+        }
+    };
+
+    let part_path = match &staging {
+        Staging::Owned { path, .. } => path.clone(),
+        Staging::Fallback { path } => path.clone(),
+    };
+    // Resume offset comes from the staging state, NOT from re-statting the
+    // file (which races with the other attempt's writer).
+    let attempt_resume = match &staging {
+        Staging::Owned { resumed_len, .. } => *resumed_len,
+        Staging::Fallback { .. } => 0,
+    };
+    // The write handle for this attempt: the locked one itself, or a fresh
+    // file on the fallback path.
+    let mut staging_file = match staging {
+        Staging::Owned { mut file, resumed_len, .. } => {
+            if resumed_len > 0 {
+                use tokio::io::AsyncSeekExt;
+                file.seek(std::io::SeekFrom::End(0)).await?;
+            }
+            Some(file)
+        }
+        Staging::Fallback { .. } => None,
+    };
 
     let _permit = ctx.host_limits.acquire(&host).await;
-
-    let attempt_resume = match tokio::fs::metadata(&part_path).await {
-        Ok(md) => md.len(),
-        Err(_) => 0,
-    };
 
     let mut request = client
         .get(url.clone())
@@ -183,7 +257,19 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     // A 206 continues the .part; a 200 (server ignored Range) restarts it.
     let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT && attempt_resume > 0;
     if !resumed && attempt_resume > 0 {
-        tokio::fs::remove_file(&part_path).await.ok();
+        // Server ignored our Range: the prefix is garbage for hashing. For
+        // the locked handle we must truncate in place (can't delete an open
+        // file on Windows); the fallback path can just recreate.
+        match &mut staging_file {
+            Some(file) => {
+                file.set_len(0).await?;
+                use tokio::io::AsyncSeekExt;
+                file.seek(std::io::SeekFrom::Start(0)).await?;
+            }
+            None => {
+                let _ = tokio::fs::remove_file(&part_path).await;
+            }
+        }
     }
 
     // Hash the full file content: on resume, stream-hash the existing
@@ -194,14 +280,19 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     }
     let written_start = if resumed { attempt_resume } else { 0 };
 
-    // Stream to .part — bounded memory regardless of file size.
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(resumed)
-        .write(true)
-        .truncate(!resumed)
-        .open(&part_path)
-        .await?;
+    // Stream to .part — bounded memory regardless of file size. On the
+    // primary path we write through the LOCKED handle (reopening would
+    // collide with our own lock on Windows).
+    let mut file = match staging_file.take() {
+        Some(f) => f,
+        None => tokio::fs::OpenOptions::new()
+            .create(true)
+            .append(resumed)
+            .write(true)
+            .truncate(!resumed)
+            .open(&part_path)
+            .await?,
+    };
 
     let mut stream = resp.bytes_stream();
     let mut written = written_start;
@@ -276,9 +367,13 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         max_duration_secs: ctx.config.media.max_duration_secs,
         min_bitrate_kbps: ctx.config.media.min_bitrate_kbps,
     };
-    let probe = match probe_audio(&part_path) {
-        Ok(p) => p,
-        Err(e) => {
+    // lofty's full parse is CPU-bound and can take seconds on large files —
+    // run it on the blocking pool so 512 concurrent tasks don't starve the
+    // runtime threads.
+    let probe_path = part_path.clone();
+    let probe = match tokio::task::spawn_blocking(move || probe_audio(&probe_path)).await {
+        Ok(Ok(p)) => Some(p),
+        Ok(Err(e)) => {
             quarantine(&ctx.config, &part_path, "unprobeable").await;
             return Ok(DownloadOutcome {
                 status: CrawlStatus::ProbeFailed,
@@ -289,7 +384,21 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
                 error: Some(e.to_string()),
             });
         }
+        Err(e) => {
+            quarantine(&ctx.config, &part_path, "unprobeable").await;
+            return Ok(DownloadOutcome {
+                status: CrawlStatus::ProbeFailed,
+                stored: None,
+                probe: None,
+                format: None,
+                bytes: written,
+                error: Some(format!("probe task panicked: {e}")),
+            });
+        }
     };
+    // `probe` is always Some here (Err paths returned above); unwrap once and
+    // keep ownership for the quality check + outcome.
+    let probe = probe.expect("probe present on success path");
     if let Err(rej) = probe.check_quality(&quality) {
         quarantine(&ctx.config, &part_path, "quality-rejected").await;
         return Ok(DownloadOutcome {
@@ -314,14 +423,14 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
 
     // Commit content-addressed; if identical content already exists, resolve
     // its canonical paths so the manifest still points at a real file.
+    // Commit streams from disk in chunks — never buffers the whole file.
     let stored = match ctx.store.lookup(&obj).await? {
         Some(existing) => {
             cleanup(&part_path).await;
             existing
         }
         None => {
-            let data = tokio::fs::read(&part_path).await?;
-            let stored = ctx.store.put(&obj, data.into()).await?;
+            let stored = ctx.store.put_stream(&obj, &part_path).await?;
             cleanup(&part_path).await;
             stored
         }
@@ -507,6 +616,9 @@ mod tests {
                 source: "test".into(),
                 collection: Some("unittest".into()),
                 license: "cc-by-4.0".into(),
+                origin_page_url: None,
+                license_url: None,
+                discovered_from_url: None,
                 title: Some("Unit Test Tone".into()),
                 artist: None,
                 album: None,

@@ -437,6 +437,30 @@ async fn process_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
 async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     let start_time = Instant::now();
     let domain = domain::extract_root_domain(&task.url).unwrap_or_else(|| "unknown".to_string());
+    let target_url = match Url::parse(&task.url) {
+        Ok(u) => u,
+        Err(e) => {
+            error!(url = %task.url, "Invalid media URL: {}", e);
+            let res =
+                record_failure(&ctx, &task, CrawlStatus::FetchError(e.to_string()), 0).await;
+            ctx.metrics.active_tasks.dec();
+            return res;
+        }
+    };
+
+    // Media hosts get the SAME politeness as pages: robots.txt rules and
+    // crawl-delay (archive.org's documented bulk envelope depends on it).
+    if ctx.config.politeness.respect_robots_txt && !ctx.robots.is_allowed(&target_url).await {
+        info!(url = %task.url, "Media URL blocked by robots.txt");
+        ctx.metrics.urls_robots_blocked.inc();
+        let res = record_failure(&ctx, &task, CrawlStatus::RobotsBlocked, 0).await;
+        ctx.metrics.active_tasks.dec();
+        return res;
+    }
+    if let Some(delay) = ctx.robots.get_crawl_delay(&target_url).await {
+        ctx.politeness.set_domain_delay(&domain, delay);
+    }
+    ctx.politeness.wait_for_permission(&domain).await;
 
     let outcome = harvest_audio(&ctx.media, &ctx.http_client, &task).await;
 
@@ -523,6 +547,10 @@ async fn process_audio_task(ctx: Arc<WorkerContext>, task: CrawlTask) -> bool {
     } else {
         result.content_hash = None;
     }
+
+    // Decrement on every terminal path (page path does this per-branch; the
+    // audio path has a single exit here).
+    ctx.metrics.active_tasks.dec();
 
     match ctx.nats.publish_result(&result).await {
         Ok(_) => true,

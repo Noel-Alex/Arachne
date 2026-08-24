@@ -25,6 +25,15 @@ pub fn harvest_job_id() -> Uuid {
     Uuid::new_v4()
 }
 
+/// Provenance links captured by adapters for one track.
+#[derive(Debug, Clone, Default)]
+pub struct OriginLinks {
+    /// Human-facing catalog page (Jamendo shareurl, archive.org /details/...).
+    pub page_url: Option<String>,
+    /// Canonical license deed URL.
+    pub license_url: Option<String>,
+}
+
 /// Build the manifest row + crawl task pair for one enumerated item.
 /// Returns `None` when the license is unknown (never admit unlicensed audio).
 #[allow(clippy::too_many_arguments)]
@@ -34,6 +43,7 @@ pub fn build_task_and_record(
     source_id: String,
     url: String,
     license: String,
+    origin: OriginLinks,
     collection: Option<String>,
     title: Option<String>,
     artist: Option<String>,
@@ -46,8 +56,13 @@ pub fn build_task_and_record(
     let meta = MediaMeta {
         source_id,
         source: source.to_string(),
-        collection,
+        collection: collection.clone(),
         license,
+        origin_page_url: origin.page_url.clone(),
+        license_url: origin.license_url.clone(),
+        // Adapters enumerate the catalog directly; the catalog page IS where
+        // this file was discovered.
+        discovered_from_url: origin.page_url.clone(),
         title: title.clone(),
         artist: artist.clone(),
         album,
@@ -84,6 +99,9 @@ fn record_from_task(task: &CrawlTask, title: Option<String>) -> TrackRecord {
         year: None,
         genre: None,
         license: meta.license.clone(),
+        license_url: meta.license_url.clone(),
+        origin_page_url: meta.origin_page_url.clone(),
+        discovered_from_url: meta.discovered_from_url.clone(),
         collection: meta.collection.clone(),
         duration_secs: None,
         bitrate_kbps: None,

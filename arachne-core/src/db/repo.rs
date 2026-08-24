@@ -103,15 +103,15 @@ impl ArachneRepo {
         // Scylla CQL has no OR and rejects PER PARTITION LIMIT placement here,
         // so this is two statements merged in Rust.
         let get_pending_tracks_stmt = session
-            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND status = 'pending' LIMIT ? ALLOW FILTERING")
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status, error FROM tracks WHERE source = ? AND status = 'pending' LIMIT ? ALLOW FILTERING")
             .await?;
         let get_stale_leases_stmt = session
-            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, error FROM tracks WHERE source = ? AND status = 'downloading' AND leased_until < ? LIMIT ? ALLOW FILTERING")
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status, error FROM tracks WHERE source = ? AND status = 'downloading' AND leased_until < ? LIMIT ? ALLOW FILTERING")
             .await?;
 
         // Full-source listing for exports (single partition scan).
         let get_tracks_by_source_stmt = session
-            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, collection, duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error FROM tracks WHERE source = ? LIMIT ?")
+            .prepare("SELECT source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error FROM tracks WHERE source = ? LIMIT ?")
             .await?;
 
         Ok(Self {
@@ -383,7 +383,7 @@ impl ArachneRepo {
         let now = Utc::now().timestamp_millis();
         self.session
             .query(
-                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     &t.source,
                     &t.source_id,
@@ -395,6 +395,9 @@ impl ArachneRepo {
                     &t.year,
                     &t.genre,
                     &t.license,
+                    &t.license_url,
+                    &t.origin_page_url,
+                    &t.discovered_from_url,
                     &t.collection,
                     t.status.as_str(),
                 ),
@@ -430,7 +433,7 @@ impl ArachneRepo {
         let res = self
             .session
             .query(
-                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS",
+                "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS",
                 (
                     &t.source,
                     &t.source_id,
@@ -442,6 +445,9 @@ impl ArachneRepo {
                     &t.year,
                     &t.genre,
                     &t.license,
+                    &t.license_url,
+                    &t.origin_page_url,
+                    &t.discovered_from_url,
                     &t.collection,
                     t.status.as_str(),
                     now,
@@ -494,10 +500,13 @@ impl ArachneRepo {
                 Option<String>,
                 String,
                 Option<String>,
+                Option<String>,
+                Option<String>,
+                Option<String>,
                 String,
                 Option<String>,
             );
-            let (source, source_id, job_id, url, title, artist, album, year, genre, license, collection, status_s, error): PendingRow =
+            let (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status_s, error): PendingRow =
                 row.into_typed()?;
 
             // Take the lease before returning it to the caller.
@@ -519,6 +528,9 @@ impl ArachneRepo {
                 year,
                 genre,
                 license,
+                license_url,
+                origin_page_url,
+                discovered_from_url,
                 collection,
                 duration_secs: None,
                 bitrate_kbps: None,
@@ -542,7 +554,7 @@ impl ArachneRepo {
             .await?
             .rows_or_empty();
 
-        // Derived row type: tuple serialization caps at 16 values, this query has 19 columns.
+        // Derived row type: tuple serialization caps at 16 values, this query has 22 columns.
         #[derive(scylla::macros::FromRow)]
         #[scylla_crate = "scylla"]
         struct TrackRow {
@@ -556,6 +568,9 @@ impl ArachneRepo {
             year: Option<i32>,
             genre: Option<String>,
             license: String,
+            license_url: Option<String>,
+            origin_page_url: Option<String>,
+            discovered_from_url: Option<String>,
             collection: Option<String>,
             duration_secs: Option<f64>,
             bitrate_kbps: Option<i32>,
@@ -581,6 +596,9 @@ impl ArachneRepo {
                 year: r.year,
                 genre: r.genre,
                 license: r.license,
+                license_url: r.license_url,
+                origin_page_url: r.origin_page_url,
+                discovered_from_url: r.discovered_from_url,
                 collection: r.collection,
                 duration_secs: r.duration_secs,
                 bitrate_kbps: r.bitrate_kbps,

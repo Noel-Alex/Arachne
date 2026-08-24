@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use arachne_core::db::ArachneRepo;
 use arachne_core::nats::NatsManager;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::{admit, harvest_job_id};
 
@@ -221,6 +221,9 @@ pub async fn harvest(
             continue;
         }
 
+        // FMA has no per-track web page (the live site's API is dead); the
+        // dataset repo + mirror path are the provenance anchors.
+        let page_url = format!("https://github.com/mdeff/fma — fma_metadata/tracks.csv track_id={}", row.track_id);
         let record = arachne_core::models::TrackRecord {
             source: SOURCE_NAME.into(),
             source_id: row.track_id.to_string(),
@@ -236,6 +239,9 @@ pub async fn harvest(
             year: None,
             genre: None,
             license: license.clone(),
+            license_url: None, // deed URL not present in tracks.csv (title text only)
+            origin_page_url: Some(page_url.clone()),
+            discovered_from_url: Some(page_url),
             collection: Some(cfg.subset.clone()),
             duration_secs: row.duration_secs,
             bitrate_kbps: row.bitrate_kbps,
@@ -259,6 +265,14 @@ pub async fn harvest(
     }
 
     if !tasks.is_empty() {
+        // The archive zip is ONE file; if it exceeds a plausible worker cap,
+        // queueing it just burns a download attempt. Warn loudly instead —
+        // manifest rows stay valid for extraction from a manually fetched zip.
+        warn!(
+            subset = %cfg.subset,
+            "FMA audio arrives as one multi-GB zip (fma_large ~100GB, fma_full ~943GB); \
+             ensure media.max_audio_size_bytes covers it or fetch the zip out-of-band"
+        );
         nats.publish_tasks_batch(&tasks).await?;
     }
 
@@ -279,6 +293,9 @@ fn emit_archive_task(job_id: uuid::Uuid, subset: &str) -> arachne_core::models::
             source: SOURCE_NAME.into(),
             collection: Some(subset.into()),
             license: "cc-by-4.0".into(), // dataset paper/code license
+            origin_page_url: Some("https://github.com/mdeff/fma".into()),
+            license_url: Some("https://creativecommons.org/licenses/by/4.0/".into()),
+            discovered_from_url: None,
             title: Some(format!("{subset}.zip")),
             artist: None,
             album: None,

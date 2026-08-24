@@ -21,6 +21,9 @@ pub struct CrawlerMetrics {
     pub audio_rejected: IntCounter,
     /// Audio downloads that failed at transport level (HTTP, network).
     pub audio_failed: IntCounter,
+    /// Messages that could not be decoded (poison pills) — ACKed to avoid
+    /// infinite redelivery, but counted so loss is visible.
+    pub messages_malformed: IntCounter,
     pub crawl_duration_ms: Histogram,
     pub page_size_bytes: Histogram,
     pub active_tasks: IntGauge,
@@ -70,6 +73,11 @@ impl CrawlerMetrics {
             "Audio downloads failed at transport level",
         )
         .unwrap();
+        let messages_malformed = IntCounter::new(
+            "arachne_messages_malformed_total",
+            "Messages dropped because they could not be decoded",
+        )
+        .unwrap();
 
         let crawl_duration_ms = Histogram::with_opts(
             HistogramOpts::new("arachne_crawl_duration_ms", "Time to crawl a page")
@@ -110,6 +118,9 @@ impl CrawlerMetrics {
             .unwrap();
         registry.register(Box::new(audio_failed.clone())).unwrap();
         registry
+            .register(Box::new(messages_malformed.clone()))
+            .unwrap();
+        registry
             .register(Box::new(crawl_duration_ms.clone()))
             .unwrap();
         registry
@@ -129,6 +140,7 @@ impl CrawlerMetrics {
             audio_harvested,
             audio_rejected,
             audio_failed,
+            messages_malformed,
             crawl_duration_ms,
             page_size_bytes,
             active_tasks,

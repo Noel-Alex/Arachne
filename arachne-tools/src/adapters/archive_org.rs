@@ -348,6 +348,14 @@ pub async fn harvest(
                 let title = item.title.clone().or_else(|| {
                     f.name.rsplit_once('.').map(|(s, _)| s.to_string())
                 });
+                let origin = super::OriginLinks {
+                    // The item's /details/ page is IA's canonical human URL.
+                    page_url: Some(format!(
+                        "https://archive.org/details/{}",
+                        item.identifier
+                    )),
+                    license_url: item.licenseurl.clone(),
+                };
                 let Some((task, record)) = build_task_and_record(
                     job_id,
                     SOURCE_NAME,
@@ -355,6 +363,7 @@ pub async fn harvest(
                     format!("{}|{}", item.identifier, f.name),
                     dl,
                     license.clone(),
+                    origin,
                     Some(cfg.collection.clone()),
                     title,
                     None, // artist lives in item metadata; leave to probe/tags

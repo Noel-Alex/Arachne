@@ -10,9 +10,14 @@ use std::time::Duration;
 
 type DomainRateLimiter = RateLimiter<NotKeyed, InMemoryState, DefaultClock>;
 
+struct DomainLimit {
+    limiter: Arc<DomainRateLimiter>,
+    configured_delay: Option<Duration>,
+}
+
 /// Per-domain rate limiter.
 pub struct PolitenessLimiter {
-    limiters: DashMap<String, Arc<DomainRateLimiter>>,
+    limiters: DashMap<String, DomainLimit>,
     default_delay: Duration,
 }
 
@@ -30,12 +35,14 @@ impl PolitenessLimiter {
         let limiter = {
             self.limiters
                 .entry(domain.to_string())
-                .or_insert_with(|| {
-                    Arc::new(RateLimiter::direct(
-                        Quota::with_period(self.default_delay).unwrap(),
-                    ))
+                .or_insert_with(|| DomainLimit {
+                    limiter: Arc::new(RateLimiter::direct(
+                        Quota::with_period(self.default_delay)
+                            .expect("default delay must form a valid quota"),
+                    )),
+                    configured_delay: None,
                 })
-                .value()
+                .limiter
                 .clone()
         };
 
@@ -43,10 +50,38 @@ impl PolitenessLimiter {
     }
 
     /// Set a custom delay for a specific domain (e.g. from robots.txt).
+    ///
+    /// Idempotent per (domain, delay): repeated calls with the same Crawl-delay
+    /// reuse the existing limiter so its shared budget stays intact. Only a
+    /// genuine change (robots.txt re-fetch after TTL) replaces the limiter,
+    /// which necessarily starts a fresh budget.
     pub fn set_domain_delay(&self, domain: &str, delay: Duration) {
-        let limit = Quota::with_period(delay)
-            .unwrap_or_else(|| Quota::per_second(NonZeroU32::new(1).unwrap()));
-        let limiter = Arc::new(RateLimiter::direct(limit));
-        self.limiters.insert(domain.to_string(), limiter);
+        // Sub-ms delays are clamped; zero falls back to 1/sec (governor's
+        // quota requires a positive period).
+        let period = if delay.is_zero() {
+            Duration::from_secs(1)
+        } else if delay < Duration::from_millis(1) {
+            Duration::from_millis(1)
+        } else {
+            delay
+        };
+
+        self.limiters
+            .entry(domain.to_string())
+            .and_modify(|limit| {
+                if limit.configured_delay != Some(delay) {
+                    let quota = Quota::with_period(period)
+                        .unwrap_or_else(|| Quota::per_second(NonZeroU32::new(1).unwrap()));
+                    limit.limiter = Arc::new(RateLimiter::direct(quota));
+                    limit.configured_delay = Some(delay);
+                }
+            })
+            .or_insert_with(|| DomainLimit {
+                limiter: Arc::new(RateLimiter::direct(
+                    Quota::with_period(period)
+                        .unwrap_or_else(|| Quota::per_second(NonZeroU32::new(1).unwrap())),
+                )),
+                configured_delay: Some(delay),
+            });
     }
 }

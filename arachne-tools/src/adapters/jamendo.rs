@@ -75,6 +75,8 @@ struct Track {
     audiodownload: String,
     #[serde(default, rename = "audiodownload_allowed")]
     download_allowed: bool,
+    #[serde(default)]
+    shareurl: String,
 }
 
 /// Parse "cc-by-nc" style code from a CC URL (segment after /licenses/).
@@ -180,6 +182,11 @@ pub async fn harvest(
             let collection = (!t.album_name.is_empty()).then(|| t.album_name.clone());
             let title = (!t.name.trim().is_empty()).then(|| t.name.clone());
             let artist = (!t.artist_name.trim().is_empty()).then(|| t.artist_name.clone());
+            let origin = super::OriginLinks {
+                // Jamendo's shareurl is the canonical human-facing track page.
+                page_url: (!t.shareurl.is_empty()).then_some(t.shareurl.clone()),
+                license_url: (!t.license_ccurl.is_empty()).then_some(t.license_ccurl.clone()),
+            };
 
             if let Some((task, record)) = build_task_and_record(
                 job_id,
@@ -187,6 +194,7 @@ pub async fn harvest(
                 t.id,
                 url,
                 license,
+                origin,
                 collection,
                 title,
                 artist,

@@ -177,6 +177,18 @@ pub struct MediaMeta {
     pub collection: Option<String>,
     /// License identifier (SPDX-ish: "cc-by-40", "cc-by-nc-40", "pd-us-mma", "unknown").
     pub license: String,
+    /// Human-facing catalog page for this track (Jamendo shareurl, archive.org
+    /// /details/<id>, …). The link a user can visit to verify provenance.
+    #[serde(default)]
+    pub origin_page_url: Option<String>,
+    /// Canonical license deed URL (e.g. https://creativecommons.org/licenses/by/4.0/).
+    #[serde(default)]
+    pub license_url: Option<String>,
+    /// The page that linked/discovered this audio. For organic discovery this
+    /// is the crawled page containing the <a href>; adapters set it to the
+    /// catalog page too when no better page exists.
+    #[serde(default)]
+    pub discovered_from_url: Option<String>,
     /// Expected file title, from the source's own metadata.
     pub title: Option<String>,
     pub artist: Option<String>,
@@ -283,6 +295,15 @@ pub struct TrackRecord {
     pub genre: Option<String>,
     /// License identifier; mandatory for admission to the manifest.
     pub license: String,
+    /// Canonical license deed URL, when the source provides one.
+    #[serde(default)]
+    pub license_url: Option<String>,
+    /// Human-facing catalog page for this track (verify provenance here).
+    #[serde(default)]
+    pub origin_page_url: Option<String>,
+    /// The page that linked/discovered this audio file.
+    #[serde(default)]
+    pub discovered_from_url: Option<String>,
     pub collection: Option<String>,
     pub duration_secs: Option<f64>,
     pub bitrate_kbps: Option<i32>,

@@ -168,6 +168,11 @@ impl NatsManager {
     }
 
     /// Create a consumer for tasks (worker).
+    ///
+    /// ack_wait must exceed the worst-case task duration: a 500MB media
+    /// download on a slow uplink takes minutes, and the server default of 30s
+    /// causes redelivery mid-download. max_deliver is kept high so transient
+    /// failures retry rather than silently terminating delivery.
     pub async fn create_task_consumer(
         &self,
         worker_name: &str,
@@ -178,7 +183,8 @@ impl NatsManager {
                 worker_name,
                 PullConfig {
                     durable_name: Some(worker_name.to_string()),
-                    max_deliver: 3,
+                    ack_wait: Duration::from_secs(600),
+                    max_deliver: 100,
                     ..Default::default()
                 },
             )

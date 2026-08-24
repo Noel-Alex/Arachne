@@ -115,15 +115,45 @@ impl MediaStore {
     pub async fn put(&self, media: &MediaObject, data: Bytes) -> Result<StoredMedia> {
         let path = media.object_path();
         self.inner.put(&path, data.into()).await?;
+        Ok(self.stored_paths(path))
+    }
+
+    /// Stream a file into the store with bounded memory (never loads the
+    /// whole file). `source` must be an already-complete staging file; the
+    /// content hash is supplied by the caller (computed during download).
+    pub async fn put_stream(
+        &self,
+        media: &MediaObject,
+        source: &std::path::Path,
+    ) -> Result<StoredMedia> {
+        let path = media.object_path();
+        let mut writer =
+            object_store::buffered::BufWriter::new(self.inner.clone(), path.clone());
+        // 256KB chunks — bounded RAM regardless of file size.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut file = tokio::fs::File::open(source).await?;
+        let mut buf = vec![0u8; 256 * 1024];
+        loop {
+            let n = file.read(&mut buf).await?;
+            if n == 0 {
+                break;
+            }
+            writer.write_all(&buf[..n]).await?;
+        }
+        writer.shutdown().await?;
+        Ok(self.stored_paths(path))
+    }
+
+    fn stored_paths(&self, path: object_store::path::Path) -> StoredMedia {
         let fs_path = if self.is_local {
             Some(local_path_for(&self.root_url, path.as_ref()))
         } else {
             None
         };
-        Ok(StoredMedia {
+        StoredMedia {
             object_path: path.to_string(),
             fs_path,
-        })
+        }
     }
 
     /// Root URL for provenance records.

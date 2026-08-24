@@ -1,0 +1,145 @@
+{
+  "title": "Arachne — Crawl & Harvest Overview",
+  "uid": "arachne-overview",
+  "tags": ["arachne"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-6h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Active Tasks (worker)",
+      "description": "Currently in-flight crawl tasks across all workers.",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
+      "targets": [{ "expr": "arachne_active_tasks", "legendFormat": "active" }],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "title": "Pages Crawled / Failed",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
+      "targets": [
+        { "expr": "sum(arachne_pages_crawled_total)", "legendFormat": "crawled" },
+        { "expr": "sum(arachne_pages_failed_total)", "legendFormat": "failed" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "title": "Audio Harvested",
+      "description": "Files that passed probe + quality gates.",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
+      "targets": [{ "expr": "sum(arachne_audio_harvested_total)", "legendFormat": "harvested" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "color": { "mode": "fixed", "fixedColor": "green" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "title": "Audio Rejected / Failed",
+      "description": "Rejected = probe/quality gates. Failed = transport errors.",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
+      "targets": [
+        { "expr": "sum(arachne_audio_rejected_total)", "legendFormat": "rejected" },
+        { "expr": "sum(arachne_audio_failed_total)", "legendFormat": "failed" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "color": { "mode": "fixed", "fixedColor": "orange" }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 5,
+      "title": "Bytes Downloaded",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
+      "targets": [{ "expr": "sum(arachne_bytes_downloaded_total)", "legendFormat": "bytes" }],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "title": "Malformed Messages Dropped",
+      "description": "Poison pills acked to avoid redelivery loops — should stay at 0.",
+      "type": "stat",
+      "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
+      "targets": [{ "expr": "sum(arachne_messages_malformed_total)", "legendFormat": "malformed" }],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 7,
+      "title": "Crawl Throughput (pages/s)",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
+      "targets": [
+        { "expr": "rate(arachne_pages_crawled_total[1m])", "legendFormat": "success" },
+        { "expr": "rate(arachne_pages_failed_total[1m])", "legendFormat": "failed" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "title": "Harvest Rate (files/s) & Bandwidth",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
+      "targets": [
+        { "expr": "sum(rate(arachne_audio_harvested_total[1m]))", "legendFormat": "audio files/s" },
+        { "expr": "sum(rate(arachne_bytes_downloaded_total[1m]))", "legendFormat": "bytes/s", "hide": false }
+      ],
+      "fieldConfig": { "defaults": { "custom": { "fillOpacity": 10 } }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "title": "URLs Discovered vs Deduped",
+      "description": "Discovery pipeline pressure; dedup ratio shows frontier quality.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        { "expr": "rate(arachne_urls_discovered_total[1m])", "legendFormat": "discovered" },
+        { "expr": "rate(arachne_urls_deduped_total[1m])", "legendFormat": "deduped" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
+    },
+    {
+      "id": 10,
+      "title": "Crawl Duration (p50 / p95)",
+      "description": "Per-task fetch duration from the worker histogram.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.50, sum(rate(arachne_crawl_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum(rate(arachne_crawl_duration_ms_bucket[5m])) by (le))",
+          "legendFormat": "p95"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    }
+  ]
+}

@@ -127,7 +127,7 @@ services:
     container_name: arachne-grafana
     user: "472"
     ports:
-      - "3000:3000"
+      - "3001:3000"   # host 3000 often taken by dev servers; UI on :3001
     volumes:
       - ./deploy/monitoring/grafana/provisioning:/etc/grafana/provisioning
       - grafana_data:/var/lib/grafana

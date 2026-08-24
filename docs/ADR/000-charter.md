@@ -6,7 +6,7 @@
 
 ## Context
 
-Arachne began as a Kafka/ScyllaDB prototype ("The Seeker" for the Logos search-engine ecosystem) and was refactored into a NATS JetStream + ScyllaDB workspace (`v2-refactor`, merged to `main` 2026-08-23). The tool is intended to be a **universal, extremely high-throughput web crawler/scraper**. Without a written charter, scope grows without a filter; this document is that filter.
+Arachne began as a Kafka/ScyllaDB prototype ("The Seeker" for the Logos search-engine ecosystem) and was refactored into a NATS JetStream workspace (`v2-refactor`, merged to `main` 2026-08-23). Metadata storage migrated from single-node ScyllaDB to PostgreSQL behind an `ArachneRepo` facade (2026-08-24; Scylla retained as opt-in). The tool is intended to be a **universal, extremely high-throughput web crawler/scraper and media-harvest engine**. Without a written charter, scope grows without a filter; this document is that filter.
 
 ## Decision
 

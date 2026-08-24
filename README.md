@@ -1,135 +1,156 @@
-# Arachne v2: The Seeker
+# Arachne
 
-A production-grade, high-performance distributed web crawling toolkit built in Rust and powered by NATS JetStream and ScyllaDB.
-
----
-
-## Overview
-
-Arachne is an extensible, modular web crawler designed for high-throughput topic-driven ingestion, site-scoped crawling, rate-limited politeness compliance, and full pipeline observability.
-
-Key design highlights in v2:
-- **Pure Rust Stack**: Eliminates C dependencies (moved from Redpanda/Kafka `rdkafka` to NATS JetStream `async-nats`).
-- **Decoupled Architecture**: Modular workspace with `arachne-core`, `arachne-worker`, `arachne-coordinator`, and `arachne-cli`.
-- **Ethical Politeness Engine**: `robots.txt` caching (`texting_robots`), adaptive per-domain rate limiting (`governor`).
-- **Smart Deduplication**: In-memory Bloom filters combined with ScyllaDB batch checks to eliminate redundant work.
-- **Rich CLI & Configuration**: Layered TOML + Environment + CLI options for job control, page limits, depth limits, and topic-focused crawling.
+A high-throughput, versatile web crawler and **media harvest engine** in pure Rust. Crawl pages at scale, or mass-harvest licensed audio/video/documents into a content-addressed store with a complete, license-tracked manifest — built for ML dataset construction (its first customer: [Sivana](https://github.com/Noel-Alex/Sivana), an audio-fingerprinting app), data-science pipelines, and AI agents.
 
 ---
+
+## What it does
+
+- **Page crawling** — polite, robots-respecting, deduplicated crawling of arbitrary sites with per-job limits (depth, page counts, domains, content size, topic focus).
+- **Media harvesting** — `arachne harvest` pulls entire licensed catalogs (Jamendo ~500k CC tracks, Internet Archive netlabels, the FMA research corpus) through a streaming downloader: resumable, magic-byte-verified, probed, quality-gated, quarantined-not-deleted on failure.
+- **Organic media discovery** — pages crawled normally also yield direct audio/video/document links, which flow back through admission as download tasks (license-gated).
+- **Provenance end-to-end** — every stored file traces back to its source: origin catalog page URL, license + license deed URL, and the exact page that linked it.
+- **Handoff bundles** — `arachne tracks-export` emits `manifest.jsonl.zst` + summary + `attribution.txt`, ready for downstream ML pipelines.
 
 ## Architecture
 
 ```
-                       +-------------------+
-                       |    arachne CLI    |
-                       +---------+---------+
-                                 |
-                                 v
-                       +-------------------+
-                       | NATS JetStream    |
-                       | (CRAWL_TASKS)     |
-                       +---------+---------+
-                                 |
-           +---------------------+---------------------+
-           |                     |                     |
-           v                     v                     v
-  +-----------------+   +-----------------+   +-----------------+
-  | arachne-worker  |   | arachne-worker  |   | arachne-worker  |
-  +--------+--------+   +--------+--------+   +--------+--------+
-           |                     |                     |
-           +---------------------+---------------------+
-                                 |
-                   (CRAWL_RESULTS / DISCOVERED_URLS)
-                                 v
-                       +-------------------+
-                       |arachne-coordinator|
-                       +---------+---------+
-                                 |
-                        +--------+--------+
-                        |                 |
-                        v                 v
-                   +----------+     +------------+
-                   | ScyllaDB |     | FS / S3    |
-                   +----------+     +------------+
+                    +----------------+
+                    |   arachne CLI  |  seed · crawl · harvest · tracks-export
+                    +--------+-------+
+                             |
+                             v
+                    +----------------+
+                    | NATS JetStream |  CRAWL_TASKS / CRAWL_RESULTS / DISCOVERED_URLS
+                    +--------+-------+
+                             |
+            +----------------+----------------+
+            v                v                v
+     +-------------+  +-------------+  +-------------+
+     |   worker    |  |   worker    |  |   worker    |   fetch → verify → probe → store
+     +------+------+  +------+------+  +------+------+
+            |                |                |
+            +----------------+----------------+
+                             v
+                    +--------------------+
+                    |    coordinator     |   admission · dedup · manifest writes
+                    +----+----------+----+
+                         |          |
+                         v          v
+                  +---------+   +----------------------------+
+                  | Postgres|   | content-addressed store    |
+                  | (or     |   | <source>/<coll>/<sha[0:2]>/|
+                  | Scylla) |   | <sha>.<ext>  (FS now, S3 later)
+                  +---------+   +----------------------------+
 ```
 
----
+- **Storage**: PostgreSQL by default (sqlx). Legacy ScyllaDB backend retained behind `database.backend = "scylla"` — see [docs](#docs).
+- **Politeness**: robots.txt caching + per-domain rate limiting (`governor`) applied to *both* page and media fetches; per-host concurrency caps for downloads; archive.org's documented bulk envelope honored by default.
+- **Durability**: manual ACK-on-success everywhere; crash-safe staging files with OS-level locks and Range resume; lease-based track claiming recovers crashed downloads.
 
-## Workspace Structure
+## Workspace
 
-- `arachne-core`: Shared types, domain logic, NATS client, Scylla repository, politeness engine, content extraction, metrics, and configuration.
-- `arachne-worker`: Stateless worker nodes that fetch pages, respect politeness, extract links/metadata, save content, and publish results.
-- `arachne-coordinator`: Coordinates crawl jobs, enforces page/domain limits, performs bloom filter + DB deduplication, and queues new tasks.
-- `arachne-cli`: Command-line tool (`arachne`) for seeding, starting jobs, inspecting status, exporting data, and checking domain metadata.
+| Crate | Role |
+|---|---|
+| `arachne-core` | Models, repository facade (Postgres/Scylla), NATS manager, politeness, robots, discovery (sitemaps/feeds/media links), audio probing, content-addressed media store, metrics |
+| `arachne-worker` | Fetches tasks: HTML pipeline for pages, streaming binary pipeline for audio/video/documents |
+| `arachne-coordinator` | Consumes results & discovered URLs; admission control, dedup, job policy, track-manifest completion |
+| `arachne-cli` | The `arachne` binary (see below) |
+| `arachne-tools` | Source adapters (jamendo, archive-org, fma) + stress tools |
 
----
+## Quick start
 
-## Quick Start
-
-### 1. Infrastructure Setup
-Start NATS JetStream, ScyllaDB, Prometheus, Loki, Promtail, and Grafana:
+### 1. Infrastructure
 
 ```bash
-docker-compose up -d
+docker compose up -d postgres nats
 ```
 
-### 2. Build binaries
+(Add `prometheus loki grafana promtail` for monitoring; Scylla is available under the `legacy-scylla` profile.)
+
+### 2. Build & run the pipeline
+
 ```bash
 cargo build --release
-```
-
-### 3. Start Coordinator and Workers
-```bash
 ./target/release/arachne-coordinator &
 ./target/release/arachne-worker &
 ```
 
-### 4. CLI Usage
+### 3. Harvest something real
 
-#### Seed URLs directly or from a file
 ```bash
-# Seed individual URLs
-./target/release/arachne seed --urls https://news.ycombinator.com https://en.wikipedia.org
+# Jamendo (~500k CC tracks; free client_id from developer.jamendo.com)
+export JAMENDO_CLIENT_ID=your_id
+./target/release/arachne harvest -s jamendo --limit 1000
 
-# Seed from a file or stdin
-./target/release/arachne seed --file urls.txt
-cat urls.txt | ./target/release/arachne seed --stdin
+# Internet Archive netlabels (CC-licensed; --contact is REQUIRED by their bots policy)
+./target/release/arachne harvest -s archive-org --contact you@example.com --limit 200
+
+# FMA research corpus (offline enumeration from fma_metadata.zip; no API key)
+./target/release/arachne harvest -s fma-small        # 8k×30s clips (7 GB)
+./target/release/arachne harvest -s fma              # full large subset (106k tracks, ~100 GB zip)
 ```
 
-#### Start a Crawl Job with Limits & Filters
+Downloads run through any started workers; watch progress via logs or Grafana.
+
+### 4. Export the handoff bundle
+
+```bash
+./target/release/arachne tracks-export -s jamendo -o ./handoff
+# → handoff/manifest.jsonl.zst  (one TrackRecord per line, zstd)
+# → handoff/manifest.json       (counts by status/format/license, totals)
+# → handoff/attribution.txt     (per-track credits grouped by license)
+```
+
+Each manifest row carries title/artist/album/year, duration/bitrate/format, sha256, byte size, store path, license id **and deed URL**, plus `origin_page_url` / `discovered_from_url` provenance.
+
+### 5. Page crawling
+
 ```bash
 ./target/release/arachne crawl \
-  --seeds "https://news.ycombinator.com" \
-  --max-pages 5000 \
-  --max-pages-per-domain 500 \
-  --max-depth 3 \
-  --allowed-domains "news.ycombinator.com,ycombinator.com" \
-  --topic "rust,systems,compiler" \
-  --max-content-size 2MB \
-  --name "hn-rust-crawl"
+  --seeds "https://example.org" \
+  --max-pages 5000 --max-depth 3 \
+  --allowed-domains "example.org" \
+  --default-license "cc-by" \
+  --name demo-crawl
 ```
 
-#### Check Job Status & Inspect Domains
-```bash
-# List all jobs
-./target/release/arachne status
+`--default-license` governs organically-discovered media: audio/video/PDF links found on crawled pages only become download tasks if a license can be attributed.
 
-# Inspect specific job
-./target/release/arachne status --job-id <UUID>
+## Media kinds
 
-# Inspect domain metadata (robots.txt, crawl delays)
-./target/release/arachne inspect ycombinator.com
-```
+| Kind | Verification | Extra processing |
+|---|---|---|
+| `AudioFile` | magic bytes (mp3/flac/ogg/wav/m4a/aac) | lofty probe: duration/bitrate/tags + quality gates (30s–30min, ≥96kbps defaults) |
+| `VideoFile` | magic bytes (mp4/mkv/webm/avi/mov) | — |
+| `DocumentFile` | magic bytes (pdf/epub/doc(x)/ppt(x)/txt) | — |
+| `BinaryFile` | none (opaque asset) | — |
 
----
+Rejected/failed files are **quarantined** under `media_store/quarantine/<reason>/`, never silently deleted.
 
-## Metrics & Observability
+## Observability
 
-- **Metrics endpoints**: Worker (`:9191/metrics`), Coordinator (`:9192/metrics`), NATS (`:8222/metrics`)
-- **Grafana Dashboards**: Default dashboard provisioning set up at `http://localhost:3000` (User: `admin`, Password: `admin`)
+- Metrics: worker `:9191/metrics`, coordinator `:9192/metrics`
+- `docker compose up -d prometheus grafana loki promtail` → Grafana at `http://localhost:3000` (admin/admin) with a pre-provisioned **Arachne — Crawl & Harvest Overview** dashboard: throughput, harvest/reject rates, bandwidth, discovery pressure, crawl-duration percentiles.
 
----
+> Linux hosts: add `extra_hosts: ["host.docker.internal:host-gateway"]` to the prometheus service so it can scrape host-run binaries.
+
+## Configuration
+
+Layered: defaults ← `config/default.toml` ← `ARACHNE_*` env vars (`__` nests sections). Key sections: `[database]` (backend/url/pool), `[nats]`, `[worker]`, `[politeness]`, `[media]` (store dir, size caps, quality gates, per-host concurrency), `[storage]`.
+
+## Docs
+
+- [`docs/ADR/000-charter.md`](docs/ADR/000-charter.md) — project charter, non-goals, roadmap milestones
+- [`docs/SOURCES.md`](docs/SOURCES.md) — per-source etiquette & legal notes (read before bulk runs; archive.org wants an email first)
+- [`docs/CONTRACT.md`](docs/CONTRACT.md) — the Sivana handoff contract (schema, guarantees, licensing posture)
+- [`docs/SCALING_GUIDE.md`](docs/SCALING_GUIDE.md) — throughput architecture notes (Scylla-era; storage section superseded by the Postgres migration)
+
+## Status & roadmap
+
+Done: M0 consolidation · M1 Sivana end-to-end (live-validated on Docker Postgres+NATS).
+Next: M2 fleet-safe spine (domain-sharded subjects, DLQ, stable durable consumers), M3 extraction/catalog quality, M4 REST+MCP API (the programmatic/web interface), M5 recipes & HF datasets.
 
 ## License
 
-Licensed under the MIT License.
+MIT

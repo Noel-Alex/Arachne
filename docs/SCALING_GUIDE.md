@@ -1,5 +1,13 @@
 # Arachne Scaling & 1 Million+ Msg/Sec Architecture Guide
 
+> **Storage note (2026-08-24):** this guide predates the PostgreSQL migration.
+> The messaging/publishing numbers below remain accurate; where it says
+> ScyllaDB for metadata storage, read **PostgreSQL by default** (ScyllaDB kept
+> as an opt-in backend). Postgres comfortably covers single-box through
+> mid-cluster metadata loads (~50k batched inserts/s, 100k+ indexed reads/s
+> on laptop-class hardware); revisit a distributed store only at true
+> multi-node write fan-in.
+
 This document outlines the architecture, optimizations, and deployment guide for scaling Arachne to **1,000,000+ pages/second** across distributed worker clusters.
 
 ---
@@ -70,7 +78,8 @@ This document outlines the architecture, optimizations, and deployment guide for
                                      |
                                      v
                   +-----------------------------------+
-                  | ScyllaDB Cluster (3+ Nodes)       |
+                  | Metadata Store Cluster            |
+                  | PostgreSQL (default) or ScyllaDB  |
                   | (crawled_pages & domain_metadata) |
                   +-----------------------------------+
 ```
@@ -80,6 +89,6 @@ This document outlines the architecture, optimizations, and deployment guide for
 ## 📦 Cluster Sizing Guidelines for 1M Pages/Sec
 
 - **NATS Cluster**: 3 nodes (4 vCPU, 8GB RAM each)
-- **ScyllaDB Cluster**: 3 nodes (8 vCPU, 32GB RAM, NVMe SSD storage)
+- **Metadata Store**: PostgreSQL with read replicas, or a ScyllaDB cluster (3 nodes, 8 vCPU, 32GB RAM, NVMe) if write fan-in outgrows it
 - **Worker Nodes**: 10–20 nodes (4 vCPU, 8GB RAM each running `arachne-worker` with `--max-concurrent-requests 1000`)
 - **Coordinator Nodes**: 2 nodes (8 vCPU, 16GB RAM running `arachne-coordinator`)

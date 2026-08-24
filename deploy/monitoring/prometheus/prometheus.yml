@@ -11,13 +11,10 @@ scrape_configs:
     static_configs:
       - targets: ['nats:8222']
 
-  - job_name: 'scylla'
-    scrape_interval: 5s
-    static_configs:
-      - targets: ['scylla:9180']
-        labels:
-          cluster: 'arachne'
-
+  # Arachne binaries run on the host (cargo build --release), so Docker
+  # reaches them via host.docker.internal. On Linux add
+  # extra_hosts: ["host.docker.internal:host-gateway"] to the prometheus
+  # service in docker-compose.yml.
   - job_name: 'arachne-worker'
     scrape_interval: 5s
     static_configs:
@@ -31,6 +28,14 @@ scrape_configs:
       - targets: ['host.docker.internal:9192']
         labels:
           component: 'coordinator'
+
+  # PostgreSQL exporter would need a dedicated service (prometheuscommunity/
+  # postgres-exporter) — enable when DB-level dashboards are wanted.
+  #
+  # Legacy ScyllaDB backend (docker compose --profile legacy-scylla):
+  #   - job_name: 'scylla'
+  #     static_configs:
+  #       - targets: ['scylla:9180']
 
   - job_name: 'loki'
     static_configs:

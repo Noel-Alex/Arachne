@@ -97,7 +97,21 @@ async fn main() -> Result<()> {
         metrics: Arc::clone(&metrics),
     });
 
-    let worker_name = format!("worker-{}", uuid::Uuid::new_v4());
+    // Stable durable name derived from the host: a restarted worker adopts
+    // its own previous consumer instead of leaving orphans that block new
+    // consumers on the workqueue stream. Multiple workers on one host would
+    // share the durable — run one worker per host, or set ARACHNE_WORKER_ID.
+    let worker_name = match std::env::var("ARACHNE_WORKER_ID") {
+        Ok(id) if !id.trim().is_empty() => format!("worker-{}", id.trim()),
+        _ => {
+            let host = std::env::var("COMPUTERNAME")
+                .or_else(|_| std::env::var("HOSTNAME"))
+                .unwrap_or_else(|_| "unknown-host".to_string())
+                .to_lowercase()
+                .replace([' ', '.', '/'], "-");
+            format!("worker-{host}")
+        }
+    };
     let consumer = nats
         .create_task_consumer(&worker_name)
         .await

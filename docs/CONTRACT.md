@@ -45,6 +45,13 @@ Audio files themselves live in a **content-addressed store**:
   "title": "…", "artist": "…", "album": "…",   // tag data preferred over source data
   "year": 2013, "genre": "…",
   "license": "cc-by-nc-sa",       // MANDATORY, SPDX-ish — see §4
+  "license_url": "https://creativecommons.org/licenses/by-nc-sa/3.0/",
+  // Human-facing catalog page (Jamendo shareurl, archive.org /details/<id>,
+  // FMA dataset repo). Verify provenance / attribution here.
+  "origin_page_url": "https://www.jamendo.com/track/1848357",
+  // The page that linked/discovered this file (equals origin page for
+  // adapters; the crawled page for organic discovery).
+  "discovered_from_url": "https://www.jamendo.com/track/1848357",
   "collection": "…",              // album/collection within the source
   "duration_secs": 213.4,
   "bitrate_kbps": 192,            // null for lossless

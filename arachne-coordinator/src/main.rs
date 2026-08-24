@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let repo = Arc::new(
         ArachneRepo::new(&config)
             .await
-            .context("Failed to connect to ScyllaDB")?,
+            .context("Failed to connect to database")?,
     );
 
     let deduplicator = Arc::new(Deduplicator::new(

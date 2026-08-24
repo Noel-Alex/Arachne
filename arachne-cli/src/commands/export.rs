@@ -28,7 +28,7 @@ pub async fn run(
 
     let repo = ArachneRepo::new(&config)
         .await
-        .context("Failed to connect to ScyllaDB")?;
+        .context("Failed to connect to database")?;
 
     let mut pages = repo.get_pages_by_domain(&target_domain).await?;
 

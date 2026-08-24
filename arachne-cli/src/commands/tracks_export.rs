@@ -21,7 +21,7 @@ pub async fn run(
 ) -> Result<()> {
     let repo = ArachneRepo::new(&config)
         .await
-        .context("Failed to connect to ScyllaDB")?;
+        .context("Failed to connect to database")?;
 
     let tracks = repo
         .list_tracks_by_source(&source, i64::MAX)

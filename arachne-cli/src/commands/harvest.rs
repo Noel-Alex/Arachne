@@ -18,7 +18,7 @@ pub async fn run(
     let repo = Arc::new(
         ArachneRepo::new(&config)
             .await
-            .context("Failed to connect to ScyllaDB")?,
+            .context("Failed to connect to database")?,
     );
     let nats = Arc::new(
         NatsManager::connect(&config.nats)

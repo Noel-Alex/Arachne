@@ -6,3 +6,12 @@ urlscan_batches/
 *.parquet
 media_store/
 handoff/
+
+# legacy non-crawler datasets (kept on disk, not in repo)
+phishing*
+legit.csv
+hn_export.json
+wiki_export.csv
+wiki_final.json
+img.png
+monitoring-configs/

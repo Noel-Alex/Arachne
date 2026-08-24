@@ -19,12 +19,12 @@ pub async fn run(
     output_dir: String,
     only_done: bool,
 ) -> Result<()> {
-    let repo = ArachneRepo::new(&config.scylla)
+    let repo = ArachneRepo::new(&config)
         .await
         .context("Failed to connect to ScyllaDB")?;
 
     let tracks = repo
-        .list_tracks_by_source(&source, i32::MAX)
+        .list_tracks_by_source(&source, i64::MAX)
         .await
         .context("Failed to list tracks")?;
 

@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 pub struct ArachneConfig {
     pub nats: NatsConfig,
     pub scylla: ScyllaConfig,
+    #[serde(default)]
+    pub database: DatabaseConfig,
     pub worker: WorkerConfig,
     pub coordinator: CoordinatorConfig,
     pub politeness: PolitenessConfig,
@@ -66,6 +68,43 @@ impl Default for ScyllaConfig {
         Self {
             uri: "127.0.0.1:9042".to_string(),
             keyspace: "arachne".to_string(),
+        }
+    }
+}
+
+/// Which storage backend the repository facade uses.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DbBackend {
+    /// PostgreSQL (recommended default; single binary via Docker).
+    #[default]
+    Postgres,
+    /// Legacy ScyllaDB backend (kept for existing deployments).
+    #[allow(dead_code)]
+    Scylla,
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct DatabaseConfig {
+    #[serde(default)]
+    pub backend: DbBackend,
+    /// libpq-style URL, e.g. postgres://arachne:arachne@127.0.0.1:5432/arachne
+    pub url: String,
+    /// Connection pool size.
+    #[serde(default = "default_pool_size")]
+    pub max_connections: u32,
+}
+
+fn default_pool_size() -> u32 {
+    10
+}
+
+impl Default for DatabaseConfig {
+    fn default() -> Self {
+        Self {
+            backend: DbBackend::Postgres,
+            url: "postgres://arachne:arachne@127.0.0.1:5432/arachne".to_string(),
+            max_connections: default_pool_size(),
         }
     }
 }

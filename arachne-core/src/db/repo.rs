@@ -36,7 +36,7 @@ pub struct CrawledPageRecord {
 }
 
 /// Arachne Repository for ScyllaDB access.
-pub struct ArachneRepo {
+pub struct ScyllaRepo {
     session: Session,
     insert_crawl_result_stmt: PreparedStatement,
     check_url_exists_stmt: PreparedStatement,
@@ -52,7 +52,7 @@ pub struct ArachneRepo {
     get_tracks_by_source_stmt: PreparedStatement,
 }
 
-impl ArachneRepo {
+impl ScyllaRepo {
     /// Create a new repository and prepare statements.
     pub async fn new(config: &ScyllaConfig) -> Result<Self> {
         let session = SessionBuilder::new()

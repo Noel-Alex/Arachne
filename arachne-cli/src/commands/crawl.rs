@@ -46,7 +46,7 @@ pub async fn run(
     let nats = NatsManager::connect(&config.nats).await?;
     nats.ensure_streams().await?;
 
-    let db = ArachneRepo::new(&config.scylla).await?;
+    let db = ArachneRepo::new(&config).await?;
 
     let job_id = Uuid::new_v4();
     let job_name = name.unwrap_or_else(|| format!("crawl-{}", &job_id.to_string()[..8]));

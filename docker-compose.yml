@@ -7,6 +7,8 @@ volumes:
     driver: local
   scylla_data:
     driver: local
+  postgres_data:
+    driver: local
   grafana_data:
     driver: local
 
@@ -29,8 +31,35 @@ services:
     networks:
       - arachne-net
 
-  # --- DATA STORE (ScyllaDB) ---
+  # --- DATA STORE (PostgreSQL — recommended default backend) ---
+  postgres:
+    image: postgres:17-alpine
+    container_name: arachne-postgres
+    environment:
+      POSTGRES_USER: arachne
+      POSTGRES_PASSWORD: arachne
+      POSTGRES_DB: arachne
+    ports:
+      - "5432:5432"   # SQL
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    # Bounded footprint: a metadata catalog, not a time-series engine.
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U arachne -d arachne"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    restart: unless-stopped
+    networks:
+      - arachne-net
+
+  # --- LEGACY STORE (ScyllaDB; only needed with database.backend="scylla") ---
   scylla:
+    profiles: ["legacy-scylla"]
     image: scylladb/scylla:latest
     container_name: arachne-scylla
     ports:
@@ -39,9 +68,9 @@ services:
     volumes:
       - scylla_data:/var/lib/scylla
     command:
-      - --smp=2
+      - --smp=1
       - --developer-mode=1
-      - --memory=4G
+      - --memory=1G
       - --cluster-name=arachne-cluster
     healthcheck:
       test: ["CMD-SHELL", "nodetool status | grep '^UN'"]
@@ -67,7 +96,7 @@ services:
       - arachne-net
     depends_on:
       - nats
-      - scylla
+      - postgres
 
   loki:
     image: grafana/loki:latest

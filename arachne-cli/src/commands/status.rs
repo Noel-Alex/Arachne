@@ -4,7 +4,7 @@ use arachne_core::db::ArachneRepo;
 
 /// Display status of crawl jobs.
 pub async fn run(config: ArachneConfig, job_id: Option<String>) -> Result<()> {
-    let db = ArachneRepo::new(&config.scylla).await?;
+    let db = ArachneRepo::new(&config).await?;
 
     if let Some(id_str) = job_id {
         let id = id_str.parse()?;

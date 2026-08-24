@@ -9,6 +9,12 @@ url = "nats://127.0.0.1:4223"
 uri = "127.0.0.1:9042"
 keyspace = "arachne"
 
+[database]
+# Storage backend: "postgres" (recommended) or "scylla" (legacy).
+backend = "postgres"
+url = "postgres://arachne:arachne@127.0.0.1:5432/arachne"
+max_connections = 10
+
 [worker]
 max_concurrent_requests = 512
 request_timeout_secs = 15

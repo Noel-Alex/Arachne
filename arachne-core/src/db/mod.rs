@@ -1,4 +1,7 @@
+pub mod backend;
+pub mod postgres;
 pub mod repo;
 pub mod schema;
 
-pub use repo::ArachneRepo;
+pub use backend::ArachneRepo;
+pub use repo::{CrawledPageRecord, DomainMetadata};

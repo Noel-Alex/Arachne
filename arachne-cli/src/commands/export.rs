@@ -26,7 +26,7 @@ pub async fn run(
 
     let filter_job_uuid = job_id.and_then(|id_str| Uuid::parse_str(&id_str).ok());
 
-    let repo = ArachneRepo::new(&config.scylla)
+    let repo = ArachneRepo::new(&config)
         .await
         .context("Failed to connect to ScyllaDB")?;
 

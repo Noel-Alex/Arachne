@@ -16,7 +16,7 @@ pub async fn run(
     contact: Option<String>,
 ) -> Result<()> {
     let repo = Arc::new(
-        ArachneRepo::new(&config.scylla)
+        ArachneRepo::new(&config)
             .await
             .context("Failed to connect to ScyllaDB")?,
     );

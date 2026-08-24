@@ -21,7 +21,7 @@ async fn main() -> Result<()> {
     println!("===============================================================");
 
     let config = ArachneConfig::load(None)?;
-    let repo = Arc::new(ArachneRepo::new(&config.scylla).await?);
+    let repo = Arc::new(ArachneRepo::new(&config).await?);
 
     let job_id = Uuid::new_v4();
     println!("Job ID: {}", job_id);

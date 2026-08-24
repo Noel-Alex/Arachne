@@ -44,7 +44,7 @@ async fn main() -> Result<()> {
         .context("Failed to ensure NATS streams")?;
 
     let repo = Arc::new(
-        ArachneRepo::new(&config.scylla)
+        ArachneRepo::new(&config)
             .await
             .context("Failed to connect to ScyllaDB")?,
     );

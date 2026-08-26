@@ -10,7 +10,7 @@ name = "arachne-worker"
 path = "src/main.rs"
 
 [dependencies]
-arachne-core = { path = "../arachne-core" }
+arachne-core = { path = "../arachne-core", version = "2.1.0" }
 tokio = { workspace = true }
 async-nats = { workspace = true }
 reqwest = { workspace = true }

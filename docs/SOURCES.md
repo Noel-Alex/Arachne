@@ -15,7 +15,7 @@ manifest. Specs below were verified live against production APIs in August
 - **Auth**: client_id from https://developer.jamendo.com — pass
   `--jamendo-client-id` or set `JAMENDO_CLIENT_ID`.
 - **Behavior baked into the adapter**:
-  - `order=id_asc` + `type=single albumtrack` for complete deterministic walks.
+  - `order=id_asc` + `type=single+albumtrack` for complete deterministic walks.
   - `audiodownload_allowed=false` tracks are skipped (no downloadable file).
   - Over-quota responses return HTTP-success with a warning field and empty
     results — treated as an error, never as end-of-catalog.
@@ -31,8 +31,12 @@ manifest. Specs below were verified live against production APIs in August
   license URLs). Filtered to redistributable licenses (cc-by, cc-by-sa, cc0,
   pd-mark, pd-us) by default.
 - **Auth**: none required. BUT a descriptive User-Agent with a contact address
-  is **mandatory** per their Bots policy — pass `--contact you@example.com`
-  or set `ARACHNE_CONTACT`.
+  is **mandatory** per their Bots policy. Two distinct UAs are involved:
+  the adapter's metadata-enumeration requests carry your contact via
+  `--contact you@example.com` or `ARACHNE_CONTACT`, while worker **download**
+  traffic uses `config.worker.user_agent` (contactless by default) — so for
+  bulk download phases set it too, e.g.
+  `ARACHNE_WORKER__USER_AGENT="ArachneBot/2.0 (+mailto:you@example.com)"`.
 - **Etiquette (enforced by adapter defaults)**:
   - Cursor-based `/services/search/v1/scrape` enumeration (advancedsearch.php
     hard-fails past 10k results).

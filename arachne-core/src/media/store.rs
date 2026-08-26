@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use object_store::local::LocalFileSystem;
 use object_store::ObjectStore;
+use object_store::local::LocalFileSystem;
 
 /// Destination for a stored media file.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -127,8 +127,7 @@ impl MediaStore {
         source: &std::path::Path,
     ) -> Result<StoredMedia> {
         let path = media.object_path();
-        let mut writer =
-            object_store::buffered::BufWriter::new(self.inner.clone(), path.clone());
+        let mut writer = object_store::buffered::BufWriter::new(self.inner.clone(), path.clone());
         // 256KB chunks — bounded RAM regardless of file size.
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let mut file = tokio::fs::File::open(source).await?;

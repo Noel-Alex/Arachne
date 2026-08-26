@@ -5,7 +5,6 @@
 //!   hard-fails past 10k results with HTTP-200 {"error":"[DEEP_PAGING]..."}.
 //! - File listing via /metadata/{identifier}; missing items return `{}`.
 //! - Download URLs require BYTE-EXACT percent-encoding of files[].name.
-//! - Durations are polymorphic ("02:57" vs "177.42") and sometimes absent.
 //! - Etiquette (bots.html): descriptive UA mandatory, ~1s spacing, honor
 //!   throttling noise (not always clean 429s).
 //!
@@ -95,10 +94,6 @@ struct IaFile {
     name: String,
     #[serde(default)]
     format: String,
-    #[serde(default)]
-    size: Option<String>,
-    #[serde(default)]
-    length: Option<String>,
 }
 
 /// Map a licenseurl/rights pair to our SPDX-ish code. `None` = unknown.
@@ -133,26 +128,10 @@ fn classify_license(licenseurl: Option<&str>, rights: Option<&str>) -> Option<St
 
 /// Is this license OK to redistribute downstream to Sivana?
 fn redistributable(license: &str) -> bool {
-    matches!(license, "cc-by" | "cc-by-sa" | "cc0-1.0" | "pd-mark" | "pd-us")
-}
-
-/// Parse IA's polymorphic length field: H?:MM:SS strings for derivatives,
-/// fractional-second strings for originals, absent for legacy files.
-fn parse_length(len: Option<&str>) -> Option<f64> {
-    let s = len?.trim();
-    if s.is_empty() {
-        return None;
-    }
-    if s.contains(':') {
-        let parts: Vec<f64> = s.split(':').filter_map(|p| p.parse().ok()).collect();
-        let mut total = 0.0;
-        for p in parts {
-            total = total * 60.0 + p;
-        }
-        Some(total)
-    } else {
-        s.parse().ok()
-    }
+    matches!(
+        license,
+        "cc-by" | "cc-by-sa" | "cc0-1.0" | "pd-mark" | "pd-us"
+    )
 }
 
 /// Which derivative we want per track-stem, in preference order.
@@ -169,36 +148,20 @@ fn format_preference(fmt: &str) -> Option<u8> {
     }
 }
 
-fn extension_for_format(fmt: &str) -> &'static str {
-    let f = fmt.to_ascii_lowercase();
-    if f.contains("vbr mp3") {
-        "mp3"
-    } else if f.contains("flac") {
-        "flac"
-    } else if f.contains("ogg") {
-        "ogg"
-    } else {
-        "bin"
-    }
-}
-
-/// One chosen audio file per track stem within an item.
-struct ChosenFile {
-    name: String,
-    url: String,
-    size_bytes: Option<i64>,
-    duration_secs: Option<f64>,
-    ext: &'static str,
-}
-
-/// Pick the best downloadable audio file per stem. Groups by filename stem so
-/// a Flac master and its VBR MP3 derivative don't both enter the manifest.
-fn choose_audio_files(files: &[IaFile]) -> Vec<ChosenFile> {
+/// Pick the best downloadable audio file name per stem. Groups by filename
+/// stem so a Flac master and its VBR MP3 derivative don't both enter the
+/// manifest. Returns IA `files[].name` values, sorted; callers build the
+/// byte-exact download URL from the item identifier + encoded name.
+fn choose_audio_files(files: &[IaFile]) -> Vec<String> {
     // stem -> (preference, index)
     let mut best: HashMap<String, (u8, usize)> = HashMap::new();
     for (i, f) in files.iter().enumerate() {
         if let Some(pref) = format_preference(&f.format) {
-            let stem = f.name.rsplit_once('.').map(|(s, _)| s.to_string()).unwrap_or_else(|| f.name.clone());
+            let stem = f
+                .name
+                .rsplit_once('.')
+                .map(|(s, _)| s.to_string())
+                .unwrap_or_else(|| f.name.clone());
             match best.get(&stem) {
                 Some((existing_pref, _)) if *existing_pref <= pref => {}
                 _ => {
@@ -208,23 +171,11 @@ fn choose_audio_files(files: &[IaFile]) -> Vec<ChosenFile> {
         }
     }
 
-    let mut out: Vec<ChosenFile> = best
+    let mut out: Vec<String> = best
         .into_values()
-        .map(|(_, i)| {
-            let f = &files[i];
-            ChosenFile {
-                name: f.name.clone(),
-                url: format!(
-                    "https://archive.org/download/{}",
-                    build_ia_path(&f.name, "")
-                ),
-                size_bytes: f.size.as_deref().and_then(|s| s.parse().ok()),
-                duration_secs: parse_length(f.length.as_deref()),
-                ext: extension_for_format(&f.format),
-            }
-        })
+        .map(|(_, i)| files[i].name.clone())
         .collect();
-    out.sort_by(|a, b| a.name.cmp(&b.name));
+    out.sort();
     out
 }
 
@@ -240,12 +191,6 @@ fn encode_segment(s: &str) -> String {
         }
     }
     out
-}
-
-fn build_ia_path(file_name: &str, identifier: &str) -> String {
-    // Used both standalone (identifier appended by caller) and inline.
-    let _ = identifier;
-    encode_segment(file_name)
 }
 
 /// Walk one collection via the cursor scrape API and enqueue downloads.
@@ -274,10 +219,7 @@ pub async fn harvest(
         let mut url = reqwest::Url::parse("https://archive.org/services/search/v1/scrape")?;
         url.query_pairs_mut()
             .append_pair("q", &format!("collection:({})", cfg.collection))
-            .append_pair(
-                "fields",
-                "identifier,title,licenseurl,rights",
-            )
+            .append_pair("fields", "identifier,title,licenseurl,rights")
             .append_pair("count", &cfg.count.to_string())
             .append_pair("sorts", "identifier asc");
         if let Some(c) = &cursor {
@@ -290,12 +232,19 @@ pub async fn harvest(
             .await
             .context("archive.org scrape request failed")?;
         if resp.status() == reqwest::StatusCode::TOO_MANY_REQUESTS {
-            warn!("archive.org 429 — backing off 30s");
-            tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+            // Honor Retry-After (seconds form); fall back to 30s when absent
+            // or unparseable.
+            let retry_after = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(30);
+            warn!("archive.org 429 — backing off {retry_after}s");
+            tokio::time::sleep(std::time::Duration::from_secs(retry_after)).await;
             continue;
         }
-        let page: ScrapeResponse =
-            resp.json().await.context("archive.org scrape bad json")?;
+        let page: ScrapeResponse = resp.json().await.context("archive.org scrape bad json")?;
 
         let n = page.items.len();
         if n == 0 {
@@ -304,7 +253,8 @@ pub async fn harvest(
 
         for item in page.items {
             items_seen += 1;
-            let license = match classify_license(item.licenseurl.as_deref(), item.rights.as_deref()) {
+            let license = match classify_license(item.licenseurl.as_deref(), item.rights.as_deref())
+            {
                 Some(l) => l,
                 None => {
                     if cfg.redistributable_only {
@@ -343,24 +293,22 @@ pub async fn harvest(
                 let dl = format!(
                     "https://archive.org/download/{}/{}",
                     encode_segment(&item.identifier),
-                    encode_segment(&f.name)
+                    encode_segment(&f)
                 );
-                let title = item.title.clone().or_else(|| {
-                    f.name.rsplit_once('.').map(|(s, _)| s.to_string())
-                });
+                let title = item
+                    .title
+                    .clone()
+                    .or_else(|| f.rsplit_once('.').map(|(s, _)| s.to_string()));
                 let origin = super::OriginLinks {
                     // The item's /details/ page is IA's canonical human URL.
-                    page_url: Some(format!(
-                        "https://archive.org/details/{}",
-                        item.identifier
-                    )),
+                    page_url: Some(format!("https://archive.org/details/{}", item.identifier)),
                     license_url: item.licenseurl.clone(),
                 };
                 let Some((task, record)) = build_task_and_record(
                     job_id,
                     SOURCE_NAME,
                     // source_id uniquely identifies the ITEM+FILE.
-                    format!("{}|{}", item.identifier, f.name),
+                    format!("{}|{}", item.identifier, f),
                     dl,
                     license.clone(),
                     origin,
@@ -371,7 +319,6 @@ pub async fn harvest(
                 ) else {
                     continue;
                 };
-                let _ = (&f.url, f.size_bytes, f.duration_secs, f.ext);
 
                 if admit(&repo, &record).await? {
                     batch.push(task);
@@ -389,7 +336,12 @@ pub async fn harvest(
             nats.publish_tasks_batch(&tasks).await?;
         }
 
-        info!(items = items_seen, admitted = admitted_total, existing = existing_total, "archive.org page ingested");
+        info!(
+            items = items_seen,
+            admitted = admitted_total,
+            existing = existing_total,
+            "archive.org page ingested"
+        );
 
         cursor = page.cursor;
         if cursor.is_none() {
@@ -408,11 +360,17 @@ mod tests {
     #[test]
     fn classifies_cc_urls() {
         assert_eq!(
-            classify_license(Some("http://creativecommons.org/licenses/by-nc-sa/4.0/"), None),
+            classify_license(
+                Some("http://creativecommons.org/licenses/by-nc-sa/4.0/"),
+                None
+            ),
             Some("cc-by-nc-sa".into())
         );
         assert_eq!(
-            classify_license(Some("http://creativecommons.org/publicdomain/mark/1.0/"), None),
+            classify_license(
+                Some("http://creativecommons.org/publicdomain/mark/1.0/"),
+                None
+            ),
             Some("pd-mark".into())
         );
         assert_eq!(classify_license(None, None), None);
@@ -428,15 +386,6 @@ mod tests {
     }
 
     #[test]
-    fn parses_polymorphic_lengths() {
-        assert_eq!(parse_length(Some("02:57")), Some(177.0));
-        assert_eq!(parse_length(Some("1:02:03")), Some(3723.0));
-        assert_eq!(parse_length(Some("177.42")), Some(177.42));
-        assert_eq!(parse_length(Some("")), None);
-        assert_eq!(parse_length(None), None);
-    }
-
-    #[test]
     fn encodes_hostile_filenames_byte_exactly() {
         assert_eq!(
             encode_segment("TAMBURAŠKI ZBOR \"ŠOKADIJA\".mp3"),
@@ -447,12 +396,21 @@ mod tests {
     #[test]
     fn prefers_mp3_derivative_over_flac_master_per_stem() {
         let files = vec![
-            IaFile { name: "song.flac".into(), format: "24bit Flac".into(), size: None, length: Some("177.42".into()) },
-            IaFile { name: "song.mp3".into(), format: "VBR MP3".into(), size: None, length: Some("02:57".into()) },
-            IaFile { name: "song.ogg".into(), format: "Ogg Vorbis".into(), size: None, length: None },
+            IaFile {
+                name: "song.flac".into(),
+                format: "24bit Flac".into(),
+            },
+            IaFile {
+                name: "song.mp3".into(),
+                format: "VBR MP3".into(),
+            },
+            IaFile {
+                name: "song.ogg".into(),
+                format: "Ogg Vorbis".into(),
+            },
         ];
         let chosen = choose_audio_files(&files);
         assert_eq!(chosen.len(), 1);
-        assert_eq!(chosen[0].name, "song.mp3");
+        assert_eq!(chosen[0], "song.mp3");
     }
 }

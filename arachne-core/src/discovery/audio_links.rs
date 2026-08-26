@@ -16,11 +16,7 @@ pub fn has_audio_extension(url: &str) -> bool {
         .next()
         // Only trust it as an extension if there IS a dot and non-empty stem.
         .filter(|_| last_seg.contains('.'))
-        .map(|ext| {
-            AUDIO_EXTENSIONS
-                .iter()
-                .any(|e| ext.eq_ignore_ascii_case(e))
-        })
+        .map(|ext| AUDIO_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
         .unwrap_or(false)
 }
 
@@ -60,16 +56,17 @@ pub fn find_audio_links(html: &str, base: &Url) -> Vec<String> {
         if name == "a" {
             let href = el.attr("href").unwrap_or_default();
             if has_audio_extension(href)
-                || el
-                    .attr("rel")
-                    .is_some_and(|r| r.split_whitespace().any(|t| t.eq_ignore_ascii_case("enclosure")))
+                || el.attr("rel").is_some_and(|r| {
+                    r.split_whitespace()
+                        .any(|t| t.eq_ignore_ascii_case("enclosure"))
+                })
             {
                 push(href);
             }
-        } else if matches!(name, "audio" | "source" | "embed") {
-            if let Some(src) = el.attr("src") {
-                push(src);
-            }
+        } else if matches!(name, "audio" | "source" | "embed")
+            && let Some(src) = el.attr("src")
+        {
+            push(src);
         }
     }
     found

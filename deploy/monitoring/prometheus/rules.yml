@@ -1,0 +1,50 @@
+# Arachne alert rules — loaded via rule_files in prometheus.yml.
+# The `component` label is stamped by scrape-time static_configs in
+# prometheus.yml, so alerts survive multi-target setups without relabeling.
+
+groups:
+  - name: arachne
+    rules:
+      - alert: ArachneWorkerDown
+        # Scrape of the worker /metrics endpoint failing for two minutes.
+        expr: up{component="worker"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Arachne worker down"
+          description: >
+            Prometheus cannot reach the worker metrics endpoint
+            (up{component="worker"} == 0 for 2m). No crawl or harvest
+            progress is possible until it recovers.
+
+      - alert: ArachneQueueBacklog
+        # Coordinator gauge: CRAWL_TASKS stream depth. Sustained growth past
+        # 100k means workers cannot drain admission output.
+        expr: arachne_frontier_size{component="coordinator"} > 100000
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Arachne frontier backlog above 100k tasks"
+          description: >
+            The task queue has held more than 100000 pending CrawlTasks for
+            15 minutes. Add worker capacity or check for stalled consumers.
+
+      - alert: ArachneHighRejectRatio
+        # More files rejected by probe/quality gates than harvested over the
+        # window. clamp_min guards division-by-zero on quiet windows.
+        expr: >
+          rate(arachne_audio_rejected_total{component="worker"}[15m])
+          /
+          clamp_min(rate(arachne_audio_harvested_total{component="worker"}[15m]), 1e-9)
+          > 1
+        for: 30m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Arachne audio reject ratio above 1 for 30m"
+          description: >
+            Workers are rejecting more audio files than they store (probe or
+            quality-gate failures outpacing successful harvests). Inspect
+            media_store/quarantine/<reason>/ for the dominant failure cause.

@@ -36,7 +36,7 @@ This document outlines the architecture, optimizations, and deployment guide for
 
 ### 3. Scalable In-Memory Bloom Filter Deduplication
 - Capacitated at **100,000,000 - 500,000,000 URLs** with a false positive rate of `0.001`.
-- Combined with ScyllaDB batch checks (`check_urls_batch`) to eliminate 99.9% of duplicate database lookups.
+- The Bloom pre-filter is ACTIVE in admission: every discovered URL is checked against it *ahead of* the database existence check, so repeats this process already dispatched skip the DB entirely (updated 2026-08-25). The Postgres batch check (`check_urls_batch`, single unnest-join round trip) stays authoritative for cross-restart truth; a Bloom false positive permanently drops a URL — accepted tradeoff at capacity 100M / fp 0.001.
 
 ### 4. WorkQueue Retention & Stream Partitioning
 - NATS JetStream `CRAWL_TASKS` stream configured with `WorkQueue` retention policy and `50GB` buffer limit.

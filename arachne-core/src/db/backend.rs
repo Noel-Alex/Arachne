@@ -2,19 +2,17 @@
 //!
 //! `ArachneRepo` keeps its historical name and method set so every call site
 //! (coordinator, CLI, adapters) compiles unchanged; the backend enum selects
-//! PostgreSQL (default) or legacy ScyllaDB at construction time.
+//! PostgreSQL (default) or ScyllaDB at construction time.
 
 use anyhow::Result;
 use uuid::Uuid;
 
 use crate::config::{ArachneConfig, DbBackend};
-use crate::models::{
-    CrawlJob, CrawlResult, JobStatus, TrackRecord,
-};
+use crate::models::{CrawlJob, CrawlResult, JobStatus, TrackRecord};
 
 use super::postgres::PostgresRepo;
-pub use super::repo::{CrawledPageRecord, DomainMetadata};
 use super::repo::ScyllaRepo;
+pub use super::repo::{CrawledPageRecord, DomainMetadata};
 
 pub enum ArachneRepo {
     Postgres(Box<PostgresRepo>),
@@ -25,8 +23,12 @@ impl ArachneRepo {
     /// Construct the configured backend and ensure schema.
     pub async fn new(config: &ArachneConfig) -> Result<Self> {
         match config.database.backend {
-            DbBackend::Postgres => Ok(Self::Postgres(Box::new(PostgresRepo::new(&config.database).await?))),
-            DbBackend::Scylla => Ok(Self::Scylla(Box::new(ScyllaRepo::new(&config.scylla).await?))),
+            DbBackend::Postgres => Ok(Self::Postgres(Box::new(
+                PostgresRepo::new(&config.database).await?,
+            ))),
+            DbBackend::Scylla => Ok(Self::Scylla(Box::new(
+                ScyllaRepo::new(&config.scylla).await?,
+            ))),
         }
     }
 
@@ -92,6 +94,27 @@ impl ArachneRepo {
         }
     }
 
+    /// Persist a domain's robots state (robots.txt body + crawl delay). The
+    /// fetch timestamp is set by the backend. This is the only writer of
+    /// `domain_metadata`; without it `arachne inspect <domain>` never has data.
+    pub async fn save_domain_metadata(
+        &self,
+        domain: &str,
+        robots_txt: Option<&str>,
+        crawl_delay_ms: Option<i32>,
+    ) -> Result<()> {
+        match self {
+            Self::Postgres(r) => {
+                r.save_domain_metadata(domain, robots_txt, crawl_delay_ms)
+                    .await
+            }
+            Self::Scylla(r) => {
+                r.save_domain_metadata(domain, robots_txt, crawl_delay_ms)
+                    .await
+            }
+        }
+    }
+
     /// Domain metadata (robots cache state). Postgres returns raw rows;
     /// Scylla converts to the typed record.
     pub async fn get_domain_metadata_raw(
@@ -99,14 +122,22 @@ impl ArachneRepo {
         domain: &str,
     ) -> Result<Option<(Option<String>, Option<i64>, Option<i32>, Option<i64>)>> {
         match self {
-            Self::Postgres(r) => Ok(r
-                .get_domain_metadata(domain)
-                .await?
-                .map(|m| (m.robots_txt, m.robots_fetched_at, m.crawl_delay_ms, m.last_crawled_at))),
-            Self::Scylla(r) => Ok(r
-                .get_domain_metadata(domain)
-                .await?
-                .map(|m| (m.robots_txt, m.robots_fetched_at.map(|t| t.timestamp_millis()), m.crawl_delay_ms, m.last_crawled_at.map(|t| t.timestamp_millis())))),
+            Self::Postgres(r) => Ok(r.get_domain_metadata(domain).await?.map(|m| {
+                (
+                    m.robots_txt,
+                    m.robots_fetched_at,
+                    m.crawl_delay_ms,
+                    m.last_crawled_at,
+                )
+            })),
+            Self::Scylla(r) => Ok(r.get_domain_metadata(domain).await?.map(|m| {
+                (
+                    m.robots_txt,
+                    m.robots_fetched_at.map(|t| t.timestamp_millis()),
+                    m.crawl_delay_ms,
+                    m.last_crawled_at.map(|t| t.timestamp_millis()),
+                )
+            })),
         }
     }
 
@@ -137,18 +168,32 @@ impl ArachneRepo {
                 .await?;
                 Ok(rows
                     .into_iter()
-                    .map(|(domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at)| CrawledPageRecord {
-                        domain,
-                        job_id,
-                        url,
-                        http_status,
-                        content_length,
-                        content_hash,
-                        title,
-                        language,
-                        content_ref,
-                        crawled_at: crawled_at.and_then(chrono::DateTime::from_timestamp_millis),
-                    })
+                    .map(
+                        |(
+                            domain,
+                            job_id,
+                            url,
+                            http_status,
+                            content_length,
+                            content_hash,
+                            title,
+                            language,
+                            content_ref,
+                            crawled_at,
+                        )| CrawledPageRecord {
+                            domain,
+                            job_id,
+                            url,
+                            http_status,
+                            content_length,
+                            content_hash,
+                            title,
+                            language,
+                            content_ref,
+                            crawled_at: crawled_at
+                                .and_then(chrono::DateTime::from_timestamp_millis),
+                        },
+                    )
                     .collect())
             }
             Self::Scylla(r) => r.get_pages_by_domain(domain).await,
@@ -179,8 +224,7 @@ impl ArachneRepo {
     ) -> Result<Vec<TrackRecord>> {
         match self {
             Self::Postgres(r) => r.list_tracks_by_source(source, limit).await,
-            // Scylla's prepared statement takes i32 for LIMIT.
-            Self::Scylla(r) => r.list_tracks_by_source(source, limit as i32).await,
+            Self::Scylla(r) => r.list_tracks_by_source(source, limit).await,
         }
     }
 }

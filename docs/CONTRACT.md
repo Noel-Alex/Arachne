@@ -34,6 +34,24 @@ Audio files themselves live in a **content-addressed store**:
 - **Known gap**: files whose tags carry no duration still pass if within size
   limits — Sivana must tolerate small metadata gaps.
 
+### Non-audio media kinds (v1.1)
+
+The store also holds `VideoFile` (mp4/mkv/webm/avi/mov), `DocumentFile`
+(pdf/epub/doc(x)/ppt(x)/txt), and opaque `BinaryFile`. All three are
+magic-byte-verified against their requested kind (BinaryFile accepts any
+recognizable-or-opaque blob) and stored content-addressed like audio — but
+they carry **no probe metadata and no quality gates**: duration/bitrate/tags
+checks remain audio-only, so video/document rows have null probe fields and
+must not be assumed to meet any duration or bitrate bound.
+
+### FMA bulk-archive convention
+
+FMA subset downloads (`fma`, `fma-large`, …) ship as ONE task whose payload is
+the whole subset zip, marked by a `source_id` ending in `-archive`
+(e.g. `fma_large-archive`). The zip is accepted with magic bytes
+`application/zip` (skipping audio probing) and committed to the store as-is;
+post-download extraction happens downstream of this contract.
+
 ## 3. Manifest row schema (`TrackRecord`, per line of manifest.jsonl.zst)
 
 ```jsonc
@@ -66,8 +84,11 @@ Audio files themselves live in a **content-addressed store**:
 
 ## 4. Licensing posture — NEEDS SIVANA SIGN-OFF
 
-Default export filter: **redistributable licenses only** (`--only-done`
-exports additionally exclude any track whose download failed).
+Default export filter: **redistributable licenses only** — the exporter
+enforces this itself, shipping only the cc-by / cc-by-sa / cc0 / public-domain
+rows from the table below unless the operator explicitly passes the
+`--all-licenses` escape hatch to include everything admitted to the manifest
+(`--only-done` additionally excludes any track whose download failed).
 
 | License class | Included by default | Notes |
 |---|---|---|
@@ -106,3 +127,11 @@ side.
 ## Changelog
 
 - v1 (2026-08-23): initial draft.
+- v1.1 (2026-08-25): documented non-audio media kinds (VideoFile / DocumentFile /
+  BinaryFile stored content-addressed, probe metadata + quality gates still
+  audio-only) and the FMA bulk-archive zip convention (`source_id` ending in
+  `-archive` stores the whole subset zip).
+- v1.1.1 (2026-08-26): clarified that non-audio kinds are magic-byte-verified
+  but carry no probe metadata or quality gates (audio-only), and documented the
+  exporter's enforced redistributable-only default with the `--all-licenses`
+  escape hatch.

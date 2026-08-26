@@ -1,13 +1,23 @@
 use anyhow::{Context, Result};
 use arachne_core::config::ArachneConfig;
 use arachne_core::db::ArachneRepo;
+use arachne_core::models::{TrackRecord, TrackStatus};
 use std::fs::File;
 use std::io::Write as _;
 use std::path::PathBuf;
 
 use crate::commands::attribution;
 
+/// Licenses under which redistribution is permitted. CONTRACT.md promises
+/// Sivana a redistributable-only snapshot by default, so anything else (e.g.
+/// Jamendo-admitted NC tracks) ships only when `--all-licenses` is passed.
+const REDISTRIBUTABLE: [&str; 5] = ["cc-by", "cc-by-sa", "cc0-1.0", "pd-mark", "pd-us"];
+
 /// Export the track manifest for a source as a Sivana handoff snapshot.
+///
+/// Default output is done-only and restricted to redistributable licenses;
+/// `--include-incomplete` adds pending/failed/rejected rows and
+/// `--all-licenses` lifts the license restriction.
 ///
 /// Emits:
 /// - `manifest.jsonl.zst` — one TrackRecord per line, zstd-compressed
@@ -17,7 +27,8 @@ pub async fn run(
     config: ArachneConfig,
     source: String,
     output_dir: String,
-    only_done: bool,
+    include_incomplete: bool,
+    all_licenses: bool,
 ) -> Result<()> {
     let repo = ArachneRepo::new(&config)
         .await
@@ -41,7 +52,7 @@ pub async fn run(
     let total_before_filter = tracks.len();
     let tracks: Vec<_> = tracks
         .into_iter()
-        .filter(|t| !only_done || t.status == arachne_core::models::TrackStatus::Done)
+        .filter(|t| track_exported(t, include_incomplete, all_licenses))
         .collect();
 
     {
@@ -80,11 +91,14 @@ pub async fn run(
     Ok(())
 }
 
-fn build_summary(
-    source: &str,
-    tracks: &[arachne_core::models::TrackRecord],
-    total_rows: usize,
-) -> serde_json::Value {
+/// A row ships only when it is complete (unless incompletes were requested)
+/// and its license permits redistribution (unless all licenses were requested).
+fn track_exported(t: &TrackRecord, include_incomplete: bool, all_licenses: bool) -> bool {
+    (include_incomplete || t.status == TrackStatus::Done)
+        && (all_licenses || REDISTRIBUTABLE.contains(&t.license.as_str()))
+}
+
+fn build_summary(source: &str, tracks: &[TrackRecord], total_rows: usize) -> serde_json::Value {
     use std::collections::BTreeMap;
     let mut by_status: BTreeMap<String, u64> = BTreeMap::new();
     let mut by_format: BTreeMap<String, u64> = BTreeMap::new();
@@ -115,4 +129,66 @@ fn build_summary(
         "by_format": by_format,
         "by_license": by_license,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::track_exported;
+    use arachne_core::models::{TrackRecord, TrackStatus};
+    use uuid::Uuid;
+
+    fn record(status: TrackStatus, license: &str) -> TrackRecord {
+        TrackRecord {
+            source: "test".into(),
+            source_id: "t1".into(),
+            job_id: Uuid::new_v4(),
+            url: "https://example.com/a.mp3".into(),
+            title: None,
+            artist: None,
+            album: None,
+            year: None,
+            genre: None,
+            license: license.into(),
+            license_url: None,
+            origin_page_url: None,
+            discovered_from_url: None,
+            collection: None,
+            duration_secs: None,
+            bitrate_kbps: None,
+            format: None,
+            sha256: None,
+            bytes: None,
+            object_path: None,
+            status,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn done_redistributable_exports_by_default() {
+        assert!(track_exported(
+            &record(TrackStatus::Done, "cc-by"),
+            false,
+            false
+        ));
+        assert!(track_exported(
+            &record(TrackStatus::Done, "cc0-1.0"),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn incomplete_rows_need_include_incomplete_flag() {
+        let t = record(TrackStatus::Pending, "cc-by");
+        assert!(!track_exported(&t, false, false));
+        assert!(track_exported(&t, true, false));
+    }
+
+    #[test]
+    fn non_redistributable_needs_all_licenses_flag() {
+        let t = record(TrackStatus::Done, "cc-by-nc");
+        assert!(!track_exported(&t, false, false));
+        assert!(track_exported(&t, false, true));
+    }
 }

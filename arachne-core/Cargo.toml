@@ -1,43 +1,80 @@
 [package]
 name = "arachne-core"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
 [dependencies]
-anyhow = "1.0.86"
-thiserror = "1.0.61"
-figment = { version = "0.10.19", features = ["toml", "env"] }
-serde = { version = "1.0.203", features = ["derive"] }
-serde_json = "1.0.117"
-bincode = "1.3.3"
-toml = "0.8.14"
-psl = "2.1.18"
-url = "2.5.2"
-chrono = { version = "0.4.38", features = ["serde"] }
-uuid = { version = "1.8.0", features = ["serde", "v4"] }
-async-nats = "0.35.0"
-scylla = "0.13.0"
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+bincode = { workspace = true }
+toml = { workspace = true }
+
+# Error handling & configuration
+anyhow = { workspace = true }
+thiserror = { workspace = true }
+figment = { workspace = true }
+dotenvy = { workspace = true }
+
+# URL handling & domain extraction
+url = { workspace = true }
+psl = { workspace = true }
+
+# Time & identifiers
+chrono = { workspace = true }
+uuid = { workspace = true }
+
+# Async runtime
+tokio = { workspace = true }
+futures = { workspace = true }
+
+# Messaging (NATS JetStream)
+async-nats = { workspace = true }
+
+# HTTP client & robots.txt
+reqwest = { workspace = true }
+texting_robots = { workspace = true }
+
+# Database
+scylla = { workspace = true }
 sqlx = { workspace = true }
-futures = "0.3.30"
-tokio = { version = "1.38.0", features = ["full"] }
-texting_robots = "0.2.1"
-reqwest = { version = "0.12.5", features = ["json"] }
-dashmap = "6.0.1"
-governor = "0.6.3"
-bloomfilter = "1.0.14"
-prometheus = "0.13.4"
-axum = "0.7.5"
-once_cell = "1.19.0"
-tracing = "0.1.40"
-tracing-subscriber = { version = "0.3.18", features = ["env-filter", "json"] }
-scraper = "0.19.0"
-object_store = { version = "0.11", features = ["aws"] }
-bytes = "1"
-sha2 = "0.10"
-hex = "0.4"
-infer = "0.16"
-lofty = "0.21"
-fs4 = { version = "0.12", features = ["tokio"] }
-quick-xml = "0.36"
-feed-rs = "2.2"
-regex = "1"
+
+# Deduplication
+bloomfilter = { workspace = true }
+
+# HTML parsing
+scraper = { workspace = true }
+
+# Discovery formats
+quick-xml = { workspace = true }
+feed-rs = { workspace = true }
+
+# Rate limiting & concurrency
+governor = { workspace = true }
+dashmap = { workspace = true }
+once_cell = { workspace = true }
+regex = { workspace = true }
+
+# Logging & metrics
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+prometheus = { workspace = true }
+
+# Content storage
+object_store = { workspace = true }
+bytes = { workspace = true }
+
+# Hashing
+sha2 = { workspace = true }
+hex = { workspace = true }
+
+# Media probing & sniffing
+lofty = { workspace = true }
+infer = { workspace = true }
+
+# File locking
+fs4 = { workspace = true }
+
+# HTTP server (metrics endpoint)
+axum = { workspace = true }

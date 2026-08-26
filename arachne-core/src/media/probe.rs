@@ -49,10 +49,10 @@ impl ProbeResult {
             return Err(QualityRejection::TooLong(self.duration_secs));
         }
         // Lossless formats report no bitrate from lofty; absence passes the gate.
-        if let Some(kbps) = self.bitrate_kbps {
-            if kbps < q.min_bitrate_kbps {
-                return Err(QualityRejection::LowBitrate(kbps));
-            }
+        if let Some(kbps) = self.bitrate_kbps
+            && kbps < q.min_bitrate_kbps
+        {
+            return Err(QualityRejection::LowBitrate(kbps));
         }
         Ok(())
     }
@@ -87,8 +87,7 @@ fn tag_string(tag: Option<&lofty::tag::Tag>, key: &ItemKey) -> Option<String> {
 /// extension — staging files are `.part`, and extensions lie anyway.
 pub fn probe_audio(path: &Path) -> Result<ProbeResult> {
     let mut file = std::fs::File::open(path).context("failed to open file for probing")?;
-    let tagged =
-        lofty::read_from(&mut file).context("lofty could not parse file as audio")?;
+    let tagged = lofty::read_from(&mut file).context("lofty could not parse file as audio")?;
     let props = tagged.properties();
 
     // Prefer the format's primary tag; fall back to whatever tag exists.

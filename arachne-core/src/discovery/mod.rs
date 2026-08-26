@@ -5,6 +5,7 @@ pub mod audio_links;
 pub mod feeds;
 pub mod media_links;
 pub mod sitemap;
+pub mod wire;
 
-pub use feeds::{parse_feed, FeedEntry};
+pub use feeds::{FeedEntry, parse_feed};
 pub use sitemap::parse_sitemap;

@@ -11,7 +11,7 @@ const BATCH_SIZE: usize = 5_000;
 #[tokio::main]
 async fn main() -> Result<()> {
     arachne_core::logging::init_logging();
-    println!("=== ARACHNE ULTRA HIGH-THROUGHPUT STRESS TEST (100K URLs) ===");
+    println!("=== ARACHNE ULTRA HIGH-THROUGHPUT STRESS TEST (1M URLs) ===");
 
     let config = ArachneConfig::load(None)?;
     let nats = NatsManager::connect(&config.nats).await?;

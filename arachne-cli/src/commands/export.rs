@@ -18,13 +18,16 @@ pub async fn run(
 
     let target_domain = match domain {
         Some(d) => d,
-        None => {
-            eprintln!("Please specify a domain using --domain <DOMAIN>");
-            return Ok(());
-        }
+        None => anyhow::bail!("Please specify a domain using --domain <DOMAIN>"),
     };
 
-    let filter_job_uuid = job_id.and_then(|id_str| Uuid::parse_str(&id_str).ok());
+    let filter_job_uuid = match job_id {
+        Some(id_str) => match Uuid::parse_str(&id_str) {
+            Ok(u) => Some(u),
+            Err(_) => anyhow::bail!("invalid job id '{id_str}': expected a UUID"),
+        },
+        None => None,
+    };
 
     let repo = ArachneRepo::new(&config)
         .await
@@ -64,28 +67,50 @@ pub async fn run(
             for page in pages {
                 writeln!(
                     file,
-                    "\"{}\",\"{}\",\"{}\",{},{},\"{}\",\"{}\",\"{}\",\"{}\",\"{}\"",
-                    page.domain,
+                    "{},{},{},{},{},{},{},{},{},{}",
+                    csv_field(&page.domain),
                     page.job_id,
-                    page.url,
+                    csv_field(&page.url),
                     page.http_status,
                     page.content_length.unwrap_or(0),
-                    page.content_hash.unwrap_or_default(),
-                    page.title.unwrap_or_default().replace('"', "\"\""),
-                    page.language.unwrap_or_default(),
-                    page.content_ref.unwrap_or_default(),
-                    page.crawled_at.map(|t| t.to_rfc3339()).unwrap_or_default()
+                    csv_field(&page.content_hash.unwrap_or_default()),
+                    csv_field(&page.title.unwrap_or_default()),
+                    csv_field(&page.language.unwrap_or_default()),
+                    csv_field(&page.content_ref.unwrap_or_default()),
+                    csv_field(&page.crawled_at.map(|t| t.to_rfc3339()).unwrap_or_default())
                 )?;
             }
             println!("✔ Successfully exported CSV to {}", file_path);
         }
-        _ => {
-            eprintln!(
-                "Unsupported format '{}'. Supported formats: json, csv",
-                format
-            );
-        }
+        _ => anyhow::bail!(
+            "Unsupported format '{}'. Supported formats: json, csv",
+            format
+        ),
     }
 
     Ok(())
+}
+
+/// Wrap a text field in double quotes and escape inner quotes so the CSV
+/// stays well-formed even when values contain `"` or `,`.
+fn csv_field(s: &str) -> String {
+    format!("\"{}\"", s.replace('"', "\"\""))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::csv_field;
+
+    #[test]
+    fn csv_field_escapes_quotes_and_commas() {
+        assert_eq!(
+            csv_field("he said \"hi\", ok"),
+            "\"he said \"\"hi\"\", ok\""
+        );
+    }
+
+    #[test]
+    fn csv_field_plain_value_is_quoted_unchanged() {
+        assert_eq!(csv_field("example.com"), "\"example.com\"");
+    }
 }

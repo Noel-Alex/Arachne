@@ -1,10 +1,14 @@
-//! ScyllaDB repository implementation.
+//! Shared row types + the ScyllaDB repository implementation.
+//!
+//! `DomainMetadata` and `CrawledPageRecord` are backend-neutral records used
+//! by the facade in `backend.rs`; `ScyllaRepo` below is the opt-in
+//! ScyllaDB backend selected via `database.backend = "scylla"`.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use futures::stream::{FuturesUnordered, StreamExt};
 use scylla::batch::{Batch, BatchType};
-use scylla::{prepared_statement::PreparedStatement, Session, SessionBuilder};
+use scylla::{Session, SessionBuilder, prepared_statement::PreparedStatement};
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use uuid::Uuid;
@@ -134,7 +138,7 @@ impl ScyllaRepo {
     pub async fn insert_crawl_result(&self, domain: &str, result: &CrawlResult) -> Result<()> {
         let timestamp = chrono::Utc::now().timestamp_millis();
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.insert_crawl_result_stmt,
                 (
                     domain,
@@ -191,10 +195,10 @@ impl ScyllaRepo {
     pub async fn check_url_exists(&self, domain: &str, job_id: Uuid, url: &str) -> Result<bool> {
         let rows = self
             .session
-            .execute(&self.check_url_exists_stmt, (domain, job_id, url))
+            .execute_unpaged(&self.check_url_exists_stmt, (domain, job_id, url))
             .await?
-            .rows_or_empty();
-        Ok(!rows.is_empty())
+            .into_rows_result()?;
+        Ok(rows.rows_num() > 0)
     }
 
     pub async fn check_urls_batch(
@@ -206,11 +210,12 @@ impl ScyllaRepo {
             let stmt = &self.check_url_exists_stmt;
             let session = &self.session;
             futures.push(async move {
-                let exists = !session
-                    .execute(stmt, (&domain, job_id, &url))
+                let exists = session
+                    .execute_unpaged(stmt, (&domain, job_id, &url))
                     .await?
-                    .rows_or_empty()
-                    .is_empty();
+                    .into_rows_result()?
+                    .rows_num()
+                    > 0;
                 if exists {
                     Ok::<_, anyhow::Error>(Some(url))
                 } else {
@@ -232,7 +237,7 @@ impl ScyllaRepo {
         let config_str = serde_json::to_string(job)?;
         let ts = chrono::Utc::now().timestamp_millis();
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.insert_job_stmt,
                 (
                     job.id,
@@ -250,7 +255,7 @@ impl ScyllaRepo {
     pub async fn update_job_status(&self, job_id: &Uuid, status: &JobStatus) -> Result<()> {
         let ts = chrono::Utc::now().timestamp_millis();
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.update_job_status_stmt,
                 (format!("{:?}", status), ts, job_id),
             )
@@ -259,31 +264,32 @@ impl ScyllaRepo {
     }
 
     pub async fn get_job(&self, job_id: &Uuid) -> Result<Option<CrawlJob>> {
-        if let Some(row) = self
+        let row: Option<(String,)> = self
             .session
-            .execute(&self.get_job_stmt, (job_id,))
+            .execute_unpaged(&self.get_job_stmt, (job_id,))
             .await?
-            .rows_or_empty()
-            .into_iter()
-            .next()
-        {
-            let (config,): (String,) = row.into_typed()?;
-            let job: CrawlJob = serde_json::from_str(&config)?;
-            Ok(Some(job))
-        } else {
-            Ok(None)
+            .into_rows_result()?
+            .maybe_first_row()?;
+        match row {
+            Some((config,)) => {
+                let job: CrawlJob = serde_json::from_str(&config)?;
+                Ok(Some(job))
+            }
+            None => Ok(None),
         }
     }
 
     pub async fn list_jobs(&self) -> Result<Vec<CrawlJob>> {
-        let mut jobs = Vec::new();
-        let rows = self
+        let rows_result = self
             .session
-            .execute(&self.list_jobs_stmt, &[])
+            .execute_unpaged(&self.list_jobs_stmt, ())
             .await?
-            .rows_or_empty();
+            .into_rows_result()?;
+        let rows = rows_result.rows::<(String,)>()?;
+
+        let mut jobs = Vec::new();
         for row in rows {
-            let (config,): (String,) = row.into_typed()?;
+            let (config,) = row?;
             if let Ok(job) = serde_json::from_str(&config) {
                 jobs.push(job);
             }
@@ -299,7 +305,7 @@ impl ScyllaRepo {
     ) -> Result<()> {
         let ts = chrono::Utc::now().timestamp_millis();
         self.session
-            .execute(
+            .execute_unpaged(
                 &self.save_domain_metadata_stmt,
                 (domain, robots_txt, ts, crawl_delay_ms),
             )
@@ -308,57 +314,56 @@ impl ScyllaRepo {
     }
 
     pub async fn get_domain_metadata(&self, domain: &str) -> Result<Option<DomainMetadata>> {
-        if let Some(row) = self
+        type MetaRow = (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i32>,
+            Option<i64>,
+        );
+        let row: Option<MetaRow> = self
             .session
-            .execute(&self.get_domain_metadata_stmt, (domain,))
+            .execute_unpaged(&self.get_domain_metadata_stmt, (domain,))
             .await?
-            .rows_or_empty()
-            .into_iter()
-            .next()
-        {
-            let (d, r, r_ts, d_ms, l_ts): (
-                String,
-                Option<String>,
-                Option<i64>,
-                Option<i32>,
-                Option<i64>,
-            ) = row.into_typed()?;
-            let meta = DomainMetadata {
-                domain: d,
-                robots_txt: r,
-                robots_fetched_at: r_ts.map(|ts| DateTime::from_timestamp_millis(ts).unwrap()),
-                crawl_delay_ms: d_ms,
-                last_crawled_at: l_ts.map(|ts| DateTime::from_timestamp_millis(ts).unwrap()),
-            };
-            Ok(Some(meta))
-        } else {
-            Ok(None)
-        }
+            .into_rows_result()?
+            .maybe_first_row()?;
+        let Some((d, r, r_ts, d_ms, l_ts)) = row else {
+            return Ok(None);
+        };
+        let meta = DomainMetadata {
+            domain: d,
+            robots_txt: r,
+            robots_fetched_at: r_ts.and_then(DateTime::from_timestamp_millis),
+            crawl_delay_ms: d_ms,
+            last_crawled_at: l_ts.and_then(DateTime::from_timestamp_millis),
+        };
+        Ok(Some(meta))
     }
 
     pub async fn get_pages_by_domain(&self, domain: &str) -> Result<Vec<CrawledPageRecord>> {
-        let mut records = Vec::new();
-        let rows = self
+        // (domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at_ms)
+        type PageRow = (
+            String,
+            Uuid,
+            String,
+            i32,
+            Option<i32>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i64>,
+        );
+        let rows_result = self
             .session
-            .execute(&self.get_pages_by_domain_stmt, (domain,))
+            .execute_unpaged(&self.get_pages_by_domain_stmt, (domain,))
             .await?
-            .rows_or_empty();
-        for row in rows {
-            // (domain, job_id, url, http_status, content_length, content_hash, title, language, content_ref, crawled_at_ms)
-            type PageRow = (
-                String,
-                Uuid,
-                String,
-                i32,
-                Option<i32>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i64>,
-            );
-            let (d, j, u, s, l, h, t, lang, r, c_ts): PageRow = row.into_typed()?;
+            .into_rows_result()?;
+        let rows = rows_result.rows::<PageRow>()?;
 
+        let mut records = Vec::new();
+        for row in rows {
+            let (d, j, u, s, l, h, t, lang, r, c_ts) = row?;
             records.push(CrawledPageRecord {
                 domain: d,
                 job_id: j,
@@ -369,7 +374,7 @@ impl ScyllaRepo {
                 title: t,
                 language: lang,
                 content_ref: r,
-                crawled_at: c_ts.map(|ts| DateTime::from_timestamp_millis(ts).unwrap()),
+                crawled_at: c_ts.and_then(DateTime::from_timestamp_millis),
             });
         }
         Ok(records)
@@ -382,7 +387,7 @@ impl ScyllaRepo {
     pub async fn upsert_track(&self, t: &TrackRecord) -> Result<()> {
         let now = Utc::now().timestamp_millis();
         self.session
-            .query(
+            .query_unpaged(
                 "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     &t.source,
@@ -405,7 +410,7 @@ impl ScyllaRepo {
             .await?;
 
         self.session
-            .query(
+            .query_unpaged(
                 "UPDATE tracks SET duration_secs = ?, bitrate_kbps = ?, format = ?, sha256 = ?, bytes = ?, object_path = ?, status = ?, error = ?, updated_at = ? WHERE source = ? AND source_id = ?",
                 (
                     &t.duration_secs,
@@ -432,7 +437,7 @@ impl ScyllaRepo {
         let now = Utc::now().timestamp_millis();
         let res = self
             .session
-            .query(
+            .query_unpaged(
                 "INSERT INTO tracks (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) IF NOT EXISTS",
                 (
                     &t.source,
@@ -455,63 +460,89 @@ impl ScyllaRepo {
             )
             .await?;
 
-        // LWT responses carry a single [applied] boolean row.
-        let mut res = res;
-        let applied = match res.rows.take().as_mut().and_then(Vec::pop) {
-            Some(row) => row.into_typed::<(bool,)>().map(|(a,)| a).unwrap_or(true),
-            None => true,
+        // LWT responses carry a single [applied] boolean row; non-row results
+        // (schema errors aside) mean "applied" in practice.
+        let applied = match res.into_rows_result() {
+            Ok(rows) => rows
+                .maybe_first_row::<(bool,)>()?
+                .map(|(a,)| a)
+                .unwrap_or(true),
+            Err(_) => true,
         };
         Ok(applied)
     }
 
     /// Claim pending/expired-lease tracks for download. `lease_ms` is how long
     /// the claimant holds them before another pass may reclaim.
-    pub async fn claim_pending_tracks(&self, source: &str, limit: i32, lease_ms: i64) -> Result<Vec<TrackRecord>> {
+    pub async fn claim_pending_tracks(
+        &self,
+        source: &str,
+        limit: i64,
+        lease_ms: i64,
+    ) -> Result<Vec<TrackRecord>> {
         let now = Utc::now().timestamp_millis();
 
         // Fresh work first, then reclaim stale leases (crash recovery).
-        let mut rows = self
+        // CQL LIMIT binds as bigint under the driver's strict type check.
+        type PendingRow = (
+            String,
+            String,
+            Uuid,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<i32>,
+            Option<String>,
+            String,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut rows: Vec<PendingRow> = self
             .session
-            .execute(&self.get_pending_tracks_stmt, (source, limit))
+            .execute_unpaged(&self.get_pending_tracks_stmt, (source, limit))
             .await?
-            .rows_or_empty();
+            .into_rows_result()?
+            .rows::<PendingRow>()?
+            .collect::<std::result::Result<_, _>>()?;
         if rows.len() < limit as usize {
-            let remaining = limit - rows.len() as i32;
-            let stale = self
+            let remaining = limit - rows.len() as i64;
+            let stale: Vec<PendingRow> = self
                 .session
-                .execute(&self.get_stale_leases_stmt, (source, now, remaining))
+                .execute_unpaged(&self.get_stale_leases_stmt, (source, now, remaining))
                 .await?
-                .rows_or_empty();
+                .into_rows_result()?
+                .rows::<PendingRow>()?
+                .collect::<std::result::Result<_, _>>()?;
             rows.extend(stale);
         }
 
         let mut claimed = Vec::new();
         let lease_until = now + lease_ms;
-        for row in rows {
-            type PendingRow = (
-                String,
-                String,
-                Uuid,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<i32>,
-                Option<String>,
-                String,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                Option<String>,
-                String,
-                Option<String>,
-            );
-            let (source, source_id, job_id, url, title, artist, album, year, genre, license, license_url, origin_page_url, discovered_from_url, collection, status_s, error): PendingRow =
-                row.into_typed()?;
-
+        for (
+            source,
+            source_id,
+            job_id,
+            url,
+            title,
+            artist,
+            album,
+            year,
+            genre,
+            license,
+            license_url,
+            origin_page_url,
+            discovered_from_url,
+            collection,
+            error,
+        ) in rows
+        {
             // Take the lease before returning it to the caller.
             self.session
-                .query(
+                .query_unpaged(
                     "UPDATE tracks SET status = 'downloading', leased_until = ?, updated_at = ? WHERE source = ? AND source_id = ?",
                     (lease_until, Utc::now().timestamp_millis(), &source, &source_id),
                 )
@@ -541,22 +572,26 @@ impl ScyllaRepo {
                 status: TrackStatus::Downloading,
                 error,
             });
-            let _ = status_s;
         }
         Ok(claimed)
     }
 
     /// All tracks for a source regardless of state (for exports).
-    pub async fn list_tracks_by_source(&self, source: &str, limit: i32) -> Result<Vec<TrackRecord>> {
-        let rows = self
+    pub async fn list_tracks_by_source(
+        &self,
+        source: &str,
+        limit: i64,
+    ) -> Result<Vec<TrackRecord>> {
+        let rows_result = self
             .session
-            .execute(&self.get_tracks_by_source_stmt, (source, limit))
+            .execute_unpaged(&self.get_tracks_by_source_stmt, (source, limit))
             .await?
-            .rows_or_empty();
+            .into_rows_result()?;
 
-        // Derived row type: tuple serialization caps at 16 values, this query has 22 columns.
-        #[derive(scylla::macros::FromRow)]
-        #[scylla_crate = "scylla"]
+        // Derived row type: this query has 22 columns, beyond the 16-value
+        // tuple cap, so a named struct carries it.
+        #[derive(scylla::DeserializeRow)]
+        #[scylla(crate = "scylla")]
         struct TrackRow {
             source: String,
             source_id: String,
@@ -582,10 +617,12 @@ impl ScyllaRepo {
             error: Option<String>,
         }
 
+        let rows = rows_result.rows::<TrackRow>()?;
         let mut tracks = Vec::new();
-        for row in rows {
-            let r: TrackRow = row.into_typed()?;
+        for r in rows {
+            let r = r?;
             tracks.push(TrackRecord {
+                status: TrackStatus::parse(&r.status),
                 source: r.source,
                 source_id: r.source_id,
                 job_id: r.job_id,
@@ -606,7 +643,6 @@ impl ScyllaRepo {
                 sha256: r.sha256,
                 bytes: r.bytes,
                 object_path: r.object_path,
-                status: TrackStatus::parse(&r.status),
                 error: r.error,
             });
         }

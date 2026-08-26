@@ -53,6 +53,30 @@ pub async fn run(
 
     let max_content_bytes = max_content_size.and_then(|s| parse_size(&s));
 
+    // Normalize every seed up front so an all-invalid seed list fails before
+    // the job row exists — otherwise we'd insert a Running job with no tasks.
+    let mut tasks = Vec::new();
+    for url_str in &seeds {
+        let Some(normalized) = arachne_core::domain::normalize_url(url_str) else {
+            tracing::warn!(url = %url_str, "Skipping invalid seed URL");
+            continue;
+        };
+        let domain = arachne_core::domain::extract_root_domain(&normalized)
+            .unwrap_or_else(|| "unknown".to_string());
+        tasks.push(CrawlTask {
+            url: normalized,
+            job_id,
+            domain,
+            depth: 0,
+            priority: 100,
+            kind: Default::default(),
+            media: None,
+        });
+    }
+    if tasks.is_empty() {
+        anyhow::bail!("no valid seed URLs");
+    }
+
     // Create the job
     let job = CrawlJob {
         id: job_id,
@@ -83,30 +107,8 @@ pub async fn run(
     db.insert_job(&job).await?;
     info!(job_id = %job_id, name = %job_name, seeds = seeds.len(), "Created crawl job");
 
-    // Seed the initial URLs
-    for url_str in &seeds {
-        let normalized = match arachne_core::domain::normalize_url(url_str) {
-            Some(u) => u,
-            None => {
-                tracing::warn!(url = %url_str, "Skipping invalid seed URL");
-                continue;
-            }
-        };
-
-        let domain = arachne_core::domain::extract_root_domain(&normalized)
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let task = CrawlTask {
-            url: normalized,
-            job_id,
-            domain,
-            depth: 0,
-            priority: 100,
-            kind: Default::default(),
-            media: None,
-        };
-
-        nats.publish_task(&task).await?;
+    for task in &tasks {
+        nats.publish_task(task).await?;
     }
 
     println!("✔ Crawl job '{}' started (id: {})", job_name, job_id);

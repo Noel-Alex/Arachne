@@ -1,7 +1,7 @@
 //! Prometheus metrics.
 
 use anyhow::Result;
-use axum::{routing::get, Router};
+use axum::{Router, routing::get};
 use prometheus::{Encoder, Histogram, HistogramOpts, IntCounter, IntGauge, Registry, TextEncoder};
 use std::sync::Arc;
 use tracing::info;
@@ -113,9 +113,7 @@ impl CrawlerMetrics {
         registry
             .register(Box::new(audio_harvested.clone()))
             .unwrap();
-        registry
-            .register(Box::new(audio_rejected.clone()))
-            .unwrap();
+        registry.register(Box::new(audio_rejected.clone())).unwrap();
         registry.register(Box::new(audio_failed.clone())).unwrap();
         registry
             .register(Box::new(messages_malformed.clone()))

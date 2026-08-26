@@ -13,9 +13,7 @@ use sqlx::postgres::{PgPool, PgPoolOptions, PgQueryResult};
 use uuid::Uuid;
 
 use crate::config::DatabaseConfig;
-use crate::models::{
-    CrawlJob, CrawlResult, JobStatus, TrackRecord, TrackStatus,
-};
+use crate::models::{CrawlJob, CrawlResult, JobStatus, TrackRecord, TrackStatus};
 
 /// Raw domain_metadata row (timestamps as epoch millis, matching the Scylla
 /// backend's storage convention).
@@ -60,6 +58,32 @@ struct TrackRow {
 const TRACK_COLUMNS: &str = "source, source_id, job_id, url, title, artist, album, year, genre, \
 license, license_url, origin_page_url, discovered_from_url, collection, \
 duration_secs, bitrate_kbps, format, sha256, bytes, object_path, status, error";
+
+/// Hot admission read: ONE round trip for the whole coordinator batch. The
+/// batch arrives as three parallel arrays, unnested into rows and joined
+/// against crawled_pages — replaces N point SELECTs inside a transaction.
+const CHECK_URLS_BATCH_SQL: &str = r#"
+SELECT c.url
+FROM crawled_pages c
+JOIN unnest($1::text[], $2::uuid[], $3::text[])
+     AS q(domain, job_id, url)
+ON c.domain = q.domain AND c.job_id = q.job_id AND c.url = q.url"#;
+
+/// High-throughput batch insert: ONE statement, ONE round trip. Parallel
+/// arrays are unnested into rows and inserted with the same conflict target
+/// as the single-row path — idempotent under re-harvests.
+const INSERT_CRAWL_RESULTS_BATCH_SQL: &str = r#"
+INSERT INTO crawled_pages
+    (domain, job_id, url, http_status, content_length, content_hash,
+     title, language, content_ref, crawled_at, crawl_duration_ms)
+SELECT q.domain, q.job_id, q.url, q.http_status, q.content_length, q.content_hash,
+       q.title, q.language, q.content_ref, $11::bigint, q.crawl_duration_ms
+FROM unnest(
+        $1::text[], $2::uuid[], $3::text[], $4::int[], $5::int[],
+        $6::text[], $7::text[], $8::text[], $9::text[], $10::int[]
+     ) AS q(domain, job_id, url, http_status, content_length,
+            content_hash, title, language, content_ref, crawl_duration_ms)
+ON CONFLICT (domain, job_id, url) DO NOTHING"#;
 
 impl PostgresRepo {
     /// Connect, run migrations, and return the repo.
@@ -118,11 +142,9 @@ impl PostgresRepo {
         .execute(&self.pool)
         .await?;
         // Existence checks are THE hot admission read; index job-scoped lookups.
-        sqlx::query(
-            "CREATE INDEX IF NOT EXISTS idx_crawled_pages_url ON crawled_pages (url)",
-        )
-        .execute(&self.pool)
-        .await?;
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_crawled_pages_url ON crawled_pages (url)")
+            .execute(&self.pool)
+            .await?;
 
         sqlx::query(
             r#"
@@ -210,11 +232,7 @@ impl PostgresRepo {
 
     // ---- crawled_pages ----
 
-    pub async fn insert_crawl_result(
-        &self,
-        domain: &str,
-        result: &CrawlResult,
-    ) -> Result<()> {
+    pub async fn insert_crawl_result(&self, domain: &str, result: &CrawlResult) -> Result<()> {
         let ts = chrono::Utc::now().timestamp_millis();
         sqlx::query(
             r#"
@@ -248,8 +266,9 @@ impl PostgresRepo {
         Ok(())
     }
 
-    /// High-throughput batch insert. One multi-row statement inside an
-    /// implicit transaction — atomic and far faster than row-at-a-time.
+    /// High-throughput batch insert. ONE multi-row statement (unnest over
+    /// parallel arrays) — single round trip, atomic without an explicit
+    /// transaction, and far faster than row-at-a-time.
     pub async fn insert_crawl_results_batch(
         &self,
         results: &[(String, CrawlResult)],
@@ -257,70 +276,88 @@ impl PostgresRepo {
         if results.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool.begin().await?;
+        let ts = chrono::Utc::now().timestamp_millis();
+        let mut domains: Vec<&str> = Vec::with_capacity(results.len());
+        let mut job_ids: Vec<Uuid> = Vec::with_capacity(results.len());
+        let mut urls: Vec<&str> = Vec::with_capacity(results.len());
+        let mut statuses: Vec<i32> = Vec::with_capacity(results.len());
+        let mut content_lengths: Vec<Option<i32>> = Vec::with_capacity(results.len());
+        let mut content_hashes: Vec<Option<&str>> = Vec::with_capacity(results.len());
+        let mut titles: Vec<Option<&str>> = Vec::with_capacity(results.len());
+        let mut languages: Vec<Option<&str>> = Vec::with_capacity(results.len());
+        let mut content_refs: Vec<Option<&str>> = Vec::with_capacity(results.len());
+        let mut durations: Vec<i32> = Vec::with_capacity(results.len());
+
         for (domain, result) in results {
-            // QueryBuilder keeps this parameterized without unsafe string SQL.
-            let ts = chrono::Utc::now().timestamp_millis();
-            sqlx::query(
-                r#"
-                INSERT INTO crawled_pages
-                    (domain, job_id, url, http_status, content_length, content_hash,
-                     title, language, content_ref, crawled_at, crawl_duration_ms)
-                VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
-                ON CONFLICT (domain, job_id, url) DO NOTHING"#,
-            )
-            .bind(domain)
-            .bind(result.job_id)
-            .bind(&result.source_url)
-            .bind(result.status.as_i32())
-            .bind(result.content_length.map(|l| l as i32))
-            .bind(&result.content_hash)
-            .bind(&result.title)
-            .bind(&result.language)
-            .bind(&result.content_ref)
-            .bind(ts)
-            .bind(result.crawl_duration_ms as i32)
-            .execute(&mut *tx)
-            .await?;
+            domains.push(domain);
+            job_ids.push(result.job_id);
+            urls.push(&result.source_url);
+            statuses.push(result.status.as_i32());
+            content_lengths.push(result.content_length.map(|l| l as i32));
+            content_hashes.push(result.content_hash.as_deref());
+            titles.push(result.title.as_deref());
+            languages.push(result.language.as_deref());
+            content_refs.push(result.content_ref.as_deref());
+            durations.push(result.crawl_duration_ms as i32);
         }
-        tx.commit().await?;
+
+        sqlx::query(INSERT_CRAWL_RESULTS_BATCH_SQL)
+            .bind(&domains)
+            .bind(&job_ids)
+            .bind(&urls)
+            .bind(&statuses)
+            .bind(&content_lengths)
+            .bind(&content_hashes)
+            .bind(&titles)
+            .bind(&languages)
+            .bind(&content_refs)
+            .bind(&durations)
+            .bind(ts)
+            .execute(&self.pool)
+            .await?;
         Ok(())
     }
 
-    /// Batch existence check for admission control.
+    /// Batch existence check for admission control — THE hottest read.
+    /// Single-round-trip semantics: the whole coordinator batch (up to
+    /// batch_size URLs) is one unnest-join statement, so no pool connection
+    /// is pinned for N sequential point SELECTs. A single statement runs in
+    /// one atomic snapshot; no explicit transaction needed.
     pub async fn check_urls_batch(
         &self,
         urls: Vec<(String, Uuid, String)>,
     ) -> Result<std::collections::HashSet<String>> {
-        let mut existing = std::collections::HashSet::new();
+        let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
         if urls.is_empty() {
             return Ok(existing);
         }
-        let mut tx = self.pool.begin().await?;
-        for (domain, job_id, url) in urls {
-            let hit: Option<(String,)> =
-                sqlx::query_as("SELECT url FROM crawled_pages WHERE domain=$1 AND job_id=$2 AND url=$3")
-                    .bind(&domain)
-                    .bind(job_id)
-                    .bind(&url)
-                    .fetch_optional(&mut *tx)
-                    .await?;
-            if hit.is_some() {
-                existing.insert(url);
-            }
+        let mut domains: Vec<&str> = Vec::with_capacity(urls.len());
+        let mut job_ids: Vec<Uuid> = Vec::with_capacity(urls.len());
+        let mut page_urls: Vec<&str> = Vec::with_capacity(urls.len());
+        for (domain, job_id, url) in &urls {
+            domains.push(domain.as_str());
+            job_ids.push(*job_id);
+            page_urls.push(url.as_str());
         }
-        tx.commit().await?;
+        let rows: Vec<(String,)> = sqlx::query_as(CHECK_URLS_BATCH_SQL)
+            .bind(&domains)
+            .bind(&job_ids)
+            .bind(&page_urls)
+            .fetch_all(&self.pool)
+            .await?;
+        existing.extend(rows.into_iter().map(|(url,)| url));
         Ok(existing)
     }
 
     pub async fn check_url_exists(&self, domain: &str, job_id: Uuid, url: &str) -> Result<bool> {
-        let hit: Option<(String,)> =
-            sqlx::query_as("SELECT url FROM crawled_pages WHERE domain=$1 AND job_id=$2 AND url=$3")
-                .bind(domain)
-                .bind(job_id)
-                .bind(url)
-                .fetch_optional(&self.pool)
-                .await?;
+        let hit: Option<(String,)> = sqlx::query_as(
+            "SELECT url FROM crawled_pages WHERE domain=$1 AND job_id=$2 AND url=$3",
+        )
+        .bind(domain)
+        .bind(job_id)
+        .bind(url)
+        .fetch_optional(&self.pool)
+        .await?;
         Ok(hit.is_some())
     }
 
@@ -409,24 +446,31 @@ impl PostgresRepo {
     /// Domain metadata (robots cache). Returns None until a row exists.
     pub async fn get_domain_metadata(&self, domain: &str) -> Result<Option<DomainMetadataRow>> {
         /// (domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at)
-        type DomainTuple = (String, Option<String>, Option<i64>, Option<i32>, Option<i64>);
-        let row: Option<DomainTuple> =
-            sqlx::query_as(
-                "SELECT domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at \
+        type DomainTuple = (
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i32>,
+            Option<i64>,
+        );
+        let row: Option<DomainTuple> = sqlx::query_as(
+            "SELECT domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at \
                  FROM domain_metadata WHERE domain = $1",
-            )
-            .bind(domain)
-            .fetch_optional(&self.pool)
-            .await?;
-        Ok(row.map(|(domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at)| {
-            DomainMetadataRow {
-                domain,
-                robots_txt,
-                robots_fetched_at,
-                crawl_delay_ms,
-                last_crawled_at,
-            }
-        }))
+        )
+        .bind(domain)
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(
+            |(domain, robots_txt, robots_fetched_at, crawl_delay_ms, last_crawled_at)| {
+                DomainMetadataRow {
+                    domain,
+                    robots_txt,
+                    robots_fetched_at,
+                    crawl_delay_ms,
+                    last_crawled_at,
+                }
+            },
+        ))
     }
 
     // ---- tracks ----
@@ -568,7 +612,11 @@ impl PostgresRepo {
     }
 
     /// All tracks for a source regardless of state (for exports).
-    pub async fn list_tracks_by_source(&self, source: &str, limit: i64) -> Result<Vec<TrackRecord>> {
+    pub async fn list_tracks_by_source(
+        &self,
+        source: &str,
+        limit: i64,
+    ) -> Result<Vec<TrackRecord>> {
         let rows: Vec<TrackRow> = sqlx::query_as::<_, TrackRowSql>(&format!(
             "SELECT {TRACK_COLUMNS} FROM tracks WHERE source = $1 LIMIT $2"
         ))
@@ -637,5 +685,73 @@ impl From<TrackRowSql> for TrackRow {
             status: s.status,
             error: s.error,
         }
+    }
+}
+
+/// DB-less regression tripwires: pin the single-statement shape of the two
+/// batched crawled_pages paths (live-DB behavior is covered by e2e_test).
+#[cfg(test)]
+mod postgres_batch_sql_tests {
+    use super::{CHECK_URLS_BATCH_SQL, INSERT_CRAWL_RESULTS_BATCH_SQL};
+
+    /// Admission read must stay a single unnest-join round trip, not regress
+    /// to per-row SELECTs.
+    #[test]
+    fn check_urls_batch_is_single_unnest_join() {
+        assert!(
+            CHECK_URLS_BATCH_SQL.contains("unnest"),
+            "check_urls_batch lost its unnest-array form"
+        );
+        assert!(
+            CHECK_URLS_BATCH_SQL.contains("JOIN"),
+            "check_urls_batch lost its join against crawled_pages"
+        );
+        for col in ["domain", "job_id", "url"] {
+            assert!(
+                CHECK_URLS_BATCH_SQL.contains(&format!("c.{col} = q.{col}")),
+                "join predicate missing c.{col} = q.{col}"
+            );
+        }
+        assert!(
+            !CHECK_URLS_BATCH_SQL.to_uppercase().contains("INSERT"),
+            "admission read must not mutate"
+        );
+    }
+
+    /// Batch insert must stay one multi-row statement with the same conflict
+    /// target as the single-row path.
+    #[test]
+    fn insert_crawl_results_batch_is_multirow_upsert_shape() {
+        assert!(
+            INSERT_CRAWL_RESULTS_BATCH_SQL.contains("unnest"),
+            "insert_crawl_results_batch lost its unnest-array form"
+        );
+        assert!(
+            INSERT_CRAWL_RESULTS_BATCH_SQL.contains("ON CONFLICT (domain, job_id, url) DO NOTHING"),
+            "conflict clause drifted from ON CONFLICT (domain, job_id, url) DO NOTHING"
+        );
+        // All 11 columns present in the column list.
+        for col in [
+            "domain",
+            "job_id",
+            "url",
+            "http_status",
+            "content_length",
+            "content_hash",
+            "title",
+            "language",
+            "content_ref",
+            "crawled_at",
+            "crawl_duration_ms",
+        ] {
+            assert!(
+                INSERT_CRAWL_RESULTS_BATCH_SQL.contains(col),
+                "column list missing {col}"
+            );
+        }
+        assert!(
+            INSERT_CRAWL_RESULTS_BATCH_SQL.contains("$11::bigint"),
+            "crawled_at must come from the scalar timestamp bind ($11)"
+        );
     }
 }

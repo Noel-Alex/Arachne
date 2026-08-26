@@ -1,9 +1,12 @@
 //! Streaming audio download path for the worker.
 //!
 //! Streams response bodies straight to `.part` files with a running SHA-256
-//! (never buffering whole files in memory), resumes partial downloads via
-//! Range/If-Range, sniffs magic bytes to catch lying extensions, probes with
-//! lofty, applies quality gates, and commits content-addressed via MediaStore.
+//! (never buffering whole files in memory), resumes partial downloads with
+//! Range requests whose 206 replies are validated against Content-Range,
+//! sniffs magic bytes to catch lying extensions, probes with lofty, applies
+//! quality gates, and commits content-addressed via MediaStore. Finished
+//! staging files are promoted to a private `.done` name while the staging
+//! lock is still held, so classification cannot race a redelivered twin.
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -13,7 +16,7 @@ use anyhow::Result;
 use arachne_core::config::ArachneConfig;
 use arachne_core::fsutil::rename_with_retry;
 use arachne_core::media::store::{MediaObject, StoredMedia};
-use arachne_core::media::{probe_audio, AudioQuality, MediaStore};
+use arachne_core::media::{AudioQuality, MediaStore, probe_audio};
 use arachne_core::models::{CrawlStatus, CrawlTask, TaskKind};
 use bytes::Bytes;
 use futures::StreamExt;
@@ -21,6 +24,12 @@ use sha2::{Digest, Sha256};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::{Mutex, Semaphore};
 use tracing::{info, warn};
+
+/// Size cap for non-audio media kinds. `max_audio_size_bytes` is tuned for
+/// audio (~500MB) and would forbid virtually every video or large document;
+/// until a dedicated config key lands (deferred to avoid a cross-crate edit),
+/// these kinds cap at 8GiB. The free-space floor still bounds disk pressure.
+const OTHER_MEDIA_MAX_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 
 /// Per-host download concurrency caps (home-IP politeness for media hosts).
 #[derive(Default)]
@@ -43,9 +52,7 @@ impl HostLimits {
             .entry(host.to_string())
             .or_insert_with(|| Arc::new(Semaphore::new(self.default_permits)))
             .clone();
-        sem.acquire_owned()
-            .await
-            .expect("semaphore never closed")
+        sem.acquire_owned().await.expect("semaphore never closed")
     }
 }
 
@@ -60,12 +67,51 @@ pub struct MediaContext {
 
 impl MediaContext {
     pub fn new(config: ArachneConfig) -> Result<Self> {
-        Ok(Self {
+        let ctx = Self {
             store: MediaStore::local(&config.media.store_dir)?,
             host_limits: HostLimits::new(config.media.per_host_concurrency),
             config,
             total_bytes: Mutex::new(0),
-        })
+        };
+        ctx.sweep_stale_parts();
+        Ok(ctx)
+    }
+
+    /// Best-effort removal of abandoned staging files.
+    ///
+    /// Age-based on purpose: a concurrent worker legitimately owns young
+    /// `.part`/`.done` files (its own attempt or a locked primary), so only
+    /// files untouched for 48h — far beyond any download — can be assumed
+    /// orphaned by a crash. Runs once at startup; never fatal.
+    fn sweep_stale_parts(&self) {
+        const MAX_AGE: std::time::Duration = std::time::Duration::from_secs(48 * 60 * 60);
+        let parts_dir = PathBuf::from(&self.config.media.store_dir).join("parts");
+        tokio::task::spawn_blocking(move || {
+            let entries = match std::fs::read_dir(&parts_dir) {
+                Ok(e) => e,
+                // Missing dir just means nothing was ever staged.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+                Err(e) => {
+                    tracing::debug!("stale .part sweep: read_dir {}: {e}", parts_dir.display());
+                    return;
+                }
+            };
+            let cutoff = std::time::SystemTime::now() - MAX_AGE;
+            for entry in entries.flatten() {
+                // Unstatable entries are skipped: deleting blind is worse
+                // than leaving one more orphan for the next sweep.
+                let stale = entry
+                    .metadata()
+                    .and_then(|m| m.modified())
+                    .is_ok_and(|m| m < cutoff);
+                if !stale {
+                    continue;
+                }
+                if let Err(e) = std::fs::remove_file(entry.path()) {
+                    tracing::debug!("stale .part sweep: remove {}: {e}", entry.path().display());
+                }
+            }
+        });
     }
 
     async fn disk_budget_ok(&self) -> bool {
@@ -78,7 +124,7 @@ impl MediaContext {
 
         // Free-space floor: pause harvesting before we starve the OS/other
         // processes of disk. Checked per-download; a single download can
-        // still overshoot up to max_audio_size_bytes.
+        // still overshoot up to its per-kind size cap.
         match fs4::available_space(&self.config.media.store_dir) {
             Ok(free) if free < self.config.media.min_free_bytes => false,
             Ok(_) => true,
@@ -104,7 +150,11 @@ pub struct DownloadOutcome {
 }
 
 /// Entry point: download + verify + probe an AudioFile task.
-pub async fn harvest_media(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask) -> DownloadOutcome {
+pub async fn harvest_media(
+    ctx: &Arc<MediaContext>,
+    client: &reqwest::Client,
+    task: &CrawlTask,
+) -> DownloadOutcome {
     match run(ctx, client, task).await {
         Ok(o) => o,
         Err(e) => DownloadOutcome {
@@ -118,7 +168,11 @@ pub async fn harvest_media(ctx: &Arc<MediaContext>, client: &reqwest::Client, ta
     }
 }
 
-async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask) -> Result<DownloadOutcome> {
+async fn run(
+    ctx: &Arc<MediaContext>,
+    client: &reqwest::Client,
+    task: &CrawlTask,
+) -> Result<DownloadOutcome> {
     let start = Instant::now();
     let url = reqwest::Url::parse(&task.url)?;
     let host = url.host_str().unwrap_or("unknown").to_string();
@@ -181,15 +235,26 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     let staging = match part_lock_holder.try_lock_exclusive() {
         Ok(()) => {
             // Lock methods take &self, so ownership stays with our binding.
-            let resumed_len = part_lock_holder
-                .metadata()
-                .await
-                .map(|m| m.len())
-                .unwrap_or(0);
-            Staging::Owned {
-                path: primary_part,
-                file: part_lock_holder,
-                resumed_len,
+            match part_lock_holder.metadata().await {
+                Ok(m) => Staging::Owned {
+                    path: primary_part,
+                    file: part_lock_holder,
+                    resumed_len: m.len(),
+                },
+                Err(e) => {
+                    // Never resume blind: an unknown length means offset 0,
+                    // and appending a fresh body onto a non-empty prefix we
+                    // couldn't stat commits mixed content whose hash still
+                    // verifies. A private fresh file is always safe.
+                    tracing::warn!(
+                        url = %task.url,
+                        error = %e,
+                        "staging metadata failed; falling back to private .part"
+                    );
+                    Staging::Fallback {
+                        path: fallback_part,
+                    }
+                }
             }
         }
         Err(_) => {
@@ -197,11 +262,13 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
                 url = %task.url,
                 "staging file locked by in-flight download; using private .part"
             );
-            Staging::Fallback { path: fallback_part }
+            Staging::Fallback {
+                path: fallback_part,
+            }
         }
     };
 
-    let part_path = match &staging {
+    let mut part_path = match &staging {
         Staging::Owned { path, .. } => path.clone(),
         Staging::Fallback { path } => path.clone(),
     };
@@ -214,7 +281,11 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     // The write handle for this attempt: the locked one itself, or a fresh
     // file on the fallback path.
     let mut staging_file = match staging {
-        Staging::Owned { mut file, resumed_len, .. } => {
+        Staging::Owned {
+            mut file,
+            resumed_len,
+            ..
+        } => {
             if resumed_len > 0 {
                 use tokio::io::AsyncSeekExt;
                 file.seek(std::io::SeekFrom::End(0)).await?;
@@ -254,12 +325,48 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         });
     }
 
-    // A 206 continues the .part; a 200 (server ignored Range) restarts it.
-    let resumed = status == reqwest::StatusCode::PARTIAL_CONTENT && attempt_resume > 0;
+    // A 206 that PROVABLY continues our .part prefix resumes it; a 200
+    // (server ignored Range) or a misaligned 206 restarts it.
+    //
+    // Why Content-Range validation rather than If-Range: If-Range needs an
+    // ETag/Last-Modified persisted across download attempts, which we do not
+    // keep — the .part is the only cross-attempt state. Instead, a 206 must
+    // echo "bytes {attempt_resume}-..." in Content-Range; anything else means
+    // the remote content may have changed since the prefix was written, and
+    // appending would splice new bytes onto old ones (a frankenfile whose
+    // running hash still verifies). We fail closed to a fresh download.
+    let server_resumed = status == reqwest::StatusCode::PARTIAL_CONTENT;
+    let aligned = resume_aligned(
+        resp.headers()
+            .get(reqwest::header::CONTENT_RANGE)
+            .and_then(|v| v.to_str().ok()),
+        attempt_resume,
+    );
+    // attempt_resume > 0 additionally guards against a server answering an
+    // un-Ranged request with 206 "bytes 0-...": with no prefix there is
+    // nothing to validate a resume against, and the fallback path has no
+    // staging handle to hash through.
+    let resumed = server_resumed && aligned && attempt_resume > 0;
     if !resumed && attempt_resume > 0 {
-        // Server ignored our Range: the prefix is garbage for hashing. For
-        // the locked handle we must truncate in place (can't delete an open
-        // file on Windows); the fallback path can just recreate.
+        if server_resumed {
+            // Misaligned (or missing) Content-Range on a 206 — log both
+            // offsets so operators can see which hosts rewrite content
+            // mid-harvest. parse_content_range_start returning None here is
+            // expected when the header is absent/unparseable.
+            warn!(
+                url = %task.url,
+                expected_start = attempt_resume,
+                reported_start = ?parse_content_range_start(
+                    resp.headers()
+                        .get(reqwest::header::CONTENT_RANGE)
+                        .and_then(|v| v.to_str().ok()),
+                ),
+                "206 resume offset mismatch; restarting download from scratch"
+            );
+        }
+        // The stale prefix is garbage for hashing. For the locked handle we
+        // must truncate in place (can't delete an open file on Windows); the
+        // fallback path can just recreate.
         match &mut staging_file {
             Some(file) => {
                 file.set_len(0).await?;
@@ -272,11 +379,35 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         }
     }
 
-    // Hash the full file content: on resume, stream-hash the existing
-    // prefix first so the final digest covers the whole file.
+    // Hash the full file content: on a validated resume, stream-hash the
+    // existing prefix first so the final digest covers the whole file. Only
+    // reached after alignment is proven above, so the prefix hashed here is
+    // guaranteed to be what the server is continuing.
+    //
+    // The prefix MUST be hashed through the locked staging handle: opening a
+    // second read handle trips our own fs4 exclusive byte-range lock on
+    // Windows (ERROR_LOCK_VIOLATION, os error 33). Reading leaves the cursor
+    // at the resume offset, i.e. EOF of the prefix, ready to append.
     let mut hasher = Sha256::new();
     if resumed {
-        hash_file_into(&part_path, &mut hasher).await?;
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+        let f = staging_file
+            .as_mut()
+            .expect("validated resume implies the owned locked handle");
+        f.seek(std::io::SeekFrom::Start(0)).await?;
+        let mut remaining = attempt_resume;
+        let mut buf = vec![0u8; 256 * 1024];
+        while remaining > 0 {
+            let want = (remaining.min(buf.len() as u64)) as usize;
+            let n = f.read(&mut buf[..want]).await?;
+            if n == 0 {
+                return Err(anyhow::anyhow!(
+                    ".part shrank below resume offset {attempt_resume}"
+                ));
+            }
+            hasher.update(&buf[..n]);
+            remaining -= n as u64;
+        }
     }
     let written_start = if resumed { attempt_resume } else { 0 };
 
@@ -285,18 +416,25 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     // collide with our own lock on Windows).
     let mut file = match staging_file.take() {
         Some(f) => f,
-        None => tokio::fs::OpenOptions::new()
-            .create(true)
-            .append(resumed)
-            .write(true)
-            .truncate(!resumed)
-            .open(&part_path)
-            .await?,
+        None => {
+            tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(resumed)
+                .write(true)
+                .truncate(!resumed)
+                .open(&part_path)
+                .await?
+        }
     };
 
     let mut stream = resp.bytes_stream();
     let mut written = written_start;
-    let max_size = ctx.config.media.max_audio_size_bytes as u64;
+    // Audio keeps its configured cap; applying it to other kinds would make
+    // videos/documents over ~500MiB unharvestable (see OTHER_MEDIA_MAX_BYTES).
+    let max_size = match task.kind {
+        TaskKind::AudioFile => ctx.config.media.max_audio_size_bytes as u64,
+        _ => OTHER_MEDIA_MAX_BYTES,
+    };
     while let Some(chunk) = stream.next().await {
         let chunk: Bytes = chunk?;
         written += chunk.len() as u64;
@@ -309,13 +447,33 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
                 probe: None,
                 format: None,
                 bytes: written,
-                error: Some(format!("exceeds max_audio_size_bytes={max_size}")),
+                error: Some(format!("exceeds {max_size}-byte cap for {:?}", task.kind)),
             });
         }
         hasher.update(&chunk);
         file.write_all(&chunk).await?;
     }
     file.sync_all().await?;
+
+    // Promote the finished staging file out of the shared namespace WHILE we
+    // still hold the staging lock (this handle carries it). Everything after
+    // this point only reads, and reading an unlocked `.part` let a
+    // redelivered twin acquire the primary lock, truncate/delete the file
+    // mid-classification, and have us commit bytes that don't match
+    // `content_hash`. After the rename a twin finds no resumable prefix and
+    // downloads fresh; its lookup-vs-put still dedups at the store. The
+    // never-locked fallback path promotes identically (its nonce suffix
+    // keeps concurrent `.done` names disjoint).
+    let done_path = PathBuf::from(&ctx.config.media.store_dir)
+        .join("parts")
+        .join(format!("{staging_key}-{attempt_nonce:08x}.done"));
+    if let Err(e) = rename_with_retry(&part_path, &done_path).await {
+        // Un-promoted bytes cannot be classified safely — fail closed rather
+        // than risk the mixed-content commit this guard exists for.
+        cleanup(&part_path).await;
+        return Err(anyhow::anyhow!("staging promote failed: {e}"));
+    }
+    part_path = done_path;
     drop(file);
 
     let content_hash = hex::encode(hasher.finalize());
@@ -325,7 +483,7 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     // audio magic bytes, video demands video, documents documents; BinaryFile
     // accepts anything infer recognizes.
     let head = read_head(&part_path, 4100).await?;
-    match verify_magic_bytes(task.kind, &head) {
+    match verify_magic_bytes(task, &head) {
         Ok(format_ext) => format_ext,
         Err(reason) => {
             quarantine(&ctx.config, &part_path, "wrong-magic-bytes").await;
@@ -340,9 +498,12 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
         }
     };
 
-    // Probe + quality gates (audio only for now).
-    if task.kind != TaskKind::AudioFile {
-        // Non-audio media: verified + committed, no deep probe yet.
+    // Probe + quality gates (audio only for now). Bulk-archive tasks (FMA
+    // subset zips) carry AudioFile kind but a zip payload lofty cannot parse,
+    // so they skip probing like non-audio media and commit for post-download
+    // extraction.
+    if task.kind != TaskKind::AudioFile || is_bulk_archive(task) {
+        // Non-audio (or bulk-archive) media: verified + committed, no deep probe.
         return commit_stored(ctx, task, &part_path, &content_hash, written, start).await;
     }
 
@@ -402,22 +563,59 @@ async fn run(ctx: &Arc<MediaContext>, client: &reqwest::Client, task: &CrawlTask
     Ok(outcome)
 }
 
+/// Extract the start offset from a `Content-Range` response header value.
+///
+/// Handles both full form ("bytes 123-456/789") and unsatisfied form
+/// ("bytes */1000"); returns None for garbage, other units, or a missing
+/// header. The unsatisfied form has no byte range to resume, so None is
+/// correct there too.
+fn parse_content_range_start(header: Option<&str>) -> Option<u64> {
+    header?
+        .strip_prefix("bytes ")?
+        .split('-')
+        .next()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+}
+
+/// Decide whether a 206 response is safe to resume onto the existing .part
+/// prefix. True only when Content-Range proves the server's stream starts at
+/// exactly `expected_start` — the resume offset our Range asked for. A
+/// missing or unparseable header also fails closed: without it we cannot
+/// distinguish an aligned resume from bytes spliced onto a stale prefix (the
+/// remote file changed between attempts), which would hash corrupt content.
+fn resume_aligned(content_range: Option<&str>, expected_start: u64) -> bool {
+    parse_content_range_start(content_range) == Some(expected_start)
+}
+
+/// FMA bulk-download convention (`emit_archive_task` in the fma adapter):
+/// one AudioFile task whose payload is the whole subset zip, marked by a
+/// `source_id` ending in `-archive`.
+fn is_bulk_archive(task: &CrawlTask) -> bool {
+    task.kind == TaskKind::AudioFile
+        && task
+            .media
+            .as_ref()
+            .is_some_and(|m| m.source_id.ends_with("-archive"))
+}
+
 /// Validate sniffed magic bytes against the requested media kind.
 /// Returns the normalized extension on success, a rejection reason on failure.
-fn verify_magic_bytes(kind: TaskKind, head: &[u8]) -> Result<String, String> {
+fn verify_magic_bytes(task: &CrawlTask, head: &[u8]) -> Result<String, String> {
+    // Tokens below are infer 0.16's actual mime_type() strings (verified in
+    // the crate source): e.g. Ogg Opus sniffs as "audio/opus" and M4A as
+    // "audio/m4a"; there is no "application/ogg"/"audio/flac"/"audio/wav"
+    // token for these matchers. Keep in sync with the crate version.
     const AUDIO_MIMES: &[&str] = &[
         "audio/mpeg",
-        "audio/flac",
         "audio/x-flac",
+        "audio/opus", // Ogg Opus container
         "audio/ogg",
-        "application/ogg",
-        "audio/wav",
         "audio/x-wav",
-        "audio/vnd.wave",
-        "audio/x-m4a",
-        "video/mp4", // m4a sniffs as video/mp4 (same ISO-BMFF container)
+        "audio/m4a", // ISO-BMFF audio container
+        "video/mp4", // some muxers tag m4a with video-brand ftyp boxes
         "audio/aac",
-        "audio/x-opus",
     ];
     const VIDEO_MIMES: &[&str] = &[
         "video/mp4",
@@ -426,25 +624,50 @@ fn verify_magic_bytes(kind: TaskKind, head: &[u8]) -> Result<String, String> {
         "video/x-matroska",
         "video/quicktime",
         "video/x-msvideo",
-        "audio/x-m4a", // m4v/m4a ambiguity — accept, extension disambiguates
+        "audio/m4a", // m4v/m4a ambiguity — accept, extension disambiguates
     ];
-    const DOCUMENT_MIMES: &[&str] = &["application/pdf", "application/zip", "application/x-ole-storage", "application/vnd.openxmlformats-officedocument"];
+    const DOCUMENT_MIMES: &[&str] = &[
+        "application/pdf",
+        "application/zip",
+        "application/x-ole-storage",
+        "application/vnd.openxmlformats-officedocument",
+    ];
 
+    let kind = task.kind;
     let Some(info) = infer::get(head) else {
         // BinaryFile accepts opaque blobs; every other kind needs recognition.
         if kind == TaskKind::BinaryFile {
             return Ok("bin".to_string());
+        }
+        // Plain text has no magic bytes, so infer can never classify it and
+        // the text/plain arm below is unreachable for it — sniff textiness
+        // here instead of rejecting every .txt document.
+        if kind == TaskKind::DocumentFile && looks_like_text(head) {
+            return Ok("txt".to_string());
         }
         return Err("unrecognized magic bytes".to_string());
     };
 
     let mime = info.mime_type();
     let accepted = match kind {
-        TaskKind::AudioFile => AUDIO_MIMES.contains(&mime),
+        TaskKind::AudioFile => {
+            // Bulk-archive exception: an FMA subset zip ships as an AudioFile
+            // task but sniffs application/zip. Accept it so it lands in the
+            // store for post-download extraction instead of quarantining a
+            // multi-GB download after transfer.
+            (is_bulk_archive(task) && mime == "application/zip") || AUDIO_MIMES.contains(&mime)
+        }
         TaskKind::VideoFile => VIDEO_MIMES.contains(&mime),
         TaskKind::DocumentFile => {
             DOCUMENT_MIMES.iter().any(|d| mime.starts_with(d))
-                || matches!(mime, "application/pdf" | "application/epub+zip" | "application/zip" | "application/x-mobipocket-ebook" | "text/plain")
+                || matches!(
+                    mime,
+                    "application/pdf"
+                        | "application/epub+zip"
+                        | "application/zip"
+                        | "application/x-mobipocket-ebook"
+                        | "text/plain"
+                )
         }
         TaskKind::BinaryFile | TaskKind::Page => true,
     };
@@ -454,24 +677,35 @@ fn verify_magic_bytes(kind: TaskKind, head: &[u8]) -> Result<String, String> {
     Ok(normalized_extension(mime, info.extension()))
 }
 
+/// Heuristic plain-text detector for magic-less content (DocumentFile tasks).
+///
+/// A head counts as text when it is valid UTF-8 with no NUL bytes and at
+/// least 90% ASCII printable/whitespace — strict enough that binary formats
+/// (whose headers are dense control/extended bytes) never pass.
+fn looks_like_text(head: &[u8]) -> bool {
+    let sample = &head[..head.len().min(4096)];
+    if std::str::from_utf8(sample).is_err() {
+        return false;
+    }
+    if sample.contains(&0u8) {
+        return false;
+    }
+    let printable = sample
+        .iter()
+        .filter(|&&b| b.is_ascii_graphic() || b.is_ascii_whitespace())
+        .count();
+    // Empty files count as text (trivially all-printable by ratio).
+    printable * 100 >= sample.len() * 90
+}
+
 /// Map a sniffed mime to our canonical extension token.
 fn normalized_extension(mime: &str, fallback_ext: &str) -> String {
     match mime {
         "audio/mpeg" => "mp3".into(),
-        "audio/flac" | "audio/x-flac" => "flac".into(),
-        "audio/ogg" | "application/ogg" | "audio/x-opus" => "ogg".into(),
-        "audio/wav" | "audio/x-wav" | "audio/vnd.wave" => "wav".into(),
-        "audio/x-m4a" | "video/mp4" if false => unreachable!(),
-        _ => infer_fallback(fallback_ext),
-    }
-}
-
-/// Second-stage mapping that distinguishes m4a from mp4 by kind context is
-/// handled by callers; this just normalizes known tokens and passes the rest.
-fn infer_fallback(ext: &str) -> String {
-    match ext {
-        "jpg" => "jpg".into(),
-        other => other.to_ascii_lowercase(),
+        "audio/x-flac" => "flac".into(),
+        "audio/opus" | "audio/ogg" => "ogg".into(),
+        "audio/x-wav" => "wav".into(),
+        _ => fallback_ext.to_ascii_lowercase(),
     }
 }
 
@@ -489,7 +723,10 @@ async fn commit_stored(
     let head = read_head(part_path, 4100).await?;
     let extension = extension_for(task, &head);
     let obj = MediaObject {
-        source: meta.as_ref().map(|m| m.source.clone()).unwrap_or_else(|| "unknown".into()),
+        source: meta
+            .as_ref()
+            .map(|m| m.source.clone())
+            .unwrap_or_else(|| "unknown".into()),
         collection: meta.as_ref().and_then(|m| m.collection.clone()),
         sha256: content_hash.to_string(),
         extension: extension.clone(),
@@ -498,19 +735,24 @@ async fn commit_stored(
     // Commit content-addressed; dedup resolves existing content's real paths.
     let stored = match ctx.store.lookup(&obj).await? {
         Some(existing) => {
+            // Dedup hit: bytes were already counted when first committed, so
+            // don't inflate max_total_bytes with them again. (Counter resets
+            // on worker restart — known limitation, documented.)
             cleanup(part_path).await;
             existing
         }
         None => {
             let stored = ctx.store.put_stream(&obj, part_path).await?;
             cleanup(part_path).await;
+            // Only newly-committed bytes count against max_total_bytes.
+            // (Counter resets on worker restart — known limitation,
+            // documented.)
+            let mut total = ctx.total_bytes.lock().await;
+            *total += written;
+            drop(total);
             stored
         }
     };
-
-    let mut total = ctx.total_bytes.lock().await;
-    *total += written;
-    drop(total);
 
     info!(
         url = %task.url,
@@ -530,31 +772,21 @@ async fn commit_stored(
     })
 }
 
-async fn hash_file_into(path: &std::path::Path, hasher: &mut Sha256) -> Result<()> {
-    use tokio::io::AsyncReadExt;
-    let mut f = tokio::fs::File::open(path).await?;
-    let mut buf = vec![0u8; 256 * 1024];
-    loop {
-        let n = f.read(&mut buf).await?;
-        if n == 0 {
-            break;
-        }
-        hasher.update(&buf[..n]);
-    }
-    Ok(())
-}
-
 fn extension_for(task: &CrawlTask, head: &[u8]) -> String {
-    // Trust sniffed type over URL extension.
+    // Trust sniffed type over URL extension. Tokens are infer 0.16's actual
+    // mime_type() strings (see verify_magic_bytes).
     if let Some(kind) = infer::get(head) {
         return match kind.mime_type() {
             "audio/mpeg" => "mp3".into(),
-            "audio/flac" | "audio/x-flac" => "flac".into(),
-            "audio/ogg" | "application/ogg" | "audio/x-opus" => "ogg".into(),
-            "audio/wav" | "audio/x-wav" | "audio/vnd.wave" => "wav".into(),
-            "audio/x-m4a" | "video/mp4" => "m4a".into(),
+            "audio/x-flac" => "flac".into(),
+            "audio/opus" | "audio/ogg" => "ogg".into(),
+            "audio/x-wav" => "wav".into(),
+            // Shared ISO-BMFF container: audio tasks get "m4a", but a real
+            // video must keep its sniffed video extension (mp4/m4v/mov) from
+            // the fallthrough below — not be mislabeled as audio.
+            "audio/m4a" | "video/mp4" if task.kind != TaskKind::VideoFile => "m4a".into(),
             "audio/aac" => "aac".into(),
-            _ => kind.extension().to_string(),
+            _ => kind.extension().to_string(), // "mp4", "m4v", "mov", "zip", ...
         };
     }
     task.url
@@ -588,7 +820,9 @@ async fn read_head(path: &std::path::Path, n: usize) -> Result<Vec<u8>> {
 
 /// Move a rejected file into quarantine (never silently delete evidence).
 async fn quarantine(config: &ArachneConfig, part_path: &std::path::Path, reason: &str) {
-    let dest_dir = PathBuf::from(&config.media.store_dir).join("quarantine").join(reason);
+    let dest_dir = PathBuf::from(&config.media.store_dir)
+        .join("quarantine")
+        .join(reason);
     if let Err(e) = tokio::fs::create_dir_all(&dest_dir).await {
         warn!("quarantine dir create failed: {e}");
         return;
@@ -759,12 +993,342 @@ mod tests {
         let second_stored = second.stored.as_ref().unwrap();
 
         // The dedup case must resolve to the SAME real file, not a placeholder.
-        assert_eq!(second_stored.object_path, first.stored.as_ref().unwrap().object_path);
+        assert_eq!(
+            second_stored.object_path,
+            first.stored.as_ref().unwrap().object_path
+        );
         assert!(second_stored.fs_path.as_ref().unwrap().is_file());
         assert_eq!(second_stored.fs_path.as_ref().unwrap(), &first_path);
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = s1.await;
         let _ = s2.await;
+    }
+
+    #[test]
+    fn bulk_archive_zip_accepted_with_zip_extension() {
+        let mut t = task_for("https://mirror.example/fma_large.zip");
+        t.media.as_mut().unwrap().source_id = "fma_large-archive".into();
+        assert_eq!(
+            verify_magic_bytes(&t, b"PK\x03\x04payload"),
+            Ok("zip".to_string())
+        );
+    }
+
+    #[test]
+    fn plain_audio_task_rejects_zip_payload() {
+        let mut t = task_for("https://x.example/track.mp3");
+        t.media.as_mut().unwrap().source_id = "12345".into();
+        assert!(verify_magic_bytes(&t, b"PK\x03\x04payload").is_err());
+    }
+
+    #[test]
+    fn extension_for_keeps_video_containers_video() {
+        // ISO-BMFF heads: ftyp box with brand in bytes 8..12.
+        let mp4_head = b"\x00\x00\x00\x18ftypisom\x00\x00\x02\x00isom";
+        let mut t = task_for("https://x.example/clip");
+        t.kind = TaskKind::VideoFile;
+        assert_eq!(extension_for(&t, mp4_head), "mp4");
+        t.kind = TaskKind::AudioFile;
+        assert_eq!(extension_for(&t, mp4_head), "m4a"); // shared container
+
+        let mov_head = b"\x00\x00\x00\x14ftypqt  \x00\x00\x02\x00qt  ";
+        t.kind = TaskKind::VideoFile;
+        assert_eq!(extension_for(&t, mov_head), "mov");
+    }
+
+    #[test]
+    fn plain_text_document_accepted_as_txt() {
+        let mut t = task_for("https://x.example/notes.txt");
+        t.kind = TaskKind::DocumentFile;
+        let head = b"The quick brown fox jumps over the lazy dog.\r\nSecond line of plain prose.\n";
+        assert_eq!(verify_magic_bytes(&t, head), Ok("txt".to_string()));
+    }
+
+    #[test]
+    fn utf8_text_with_accents_accepted_as_txt() {
+        // Mostly-ASCII prose keeps the >=90% printable ratio despite the
+        // multi-byte accented characters.
+        let mut t = task_for("https://x.example/cafe.txt");
+        t.kind = TaskKind::DocumentFile;
+        let head = "A short essay about cafe culture in Sao Paulo; it keeps many \
+                    ordinary ASCII sentences so the ratio stays high. Café!\n"
+            .to_string()
+            .into_bytes();
+        assert_eq!(verify_magic_bytes(&t, &head), Ok("txt".to_string()));
+    }
+
+    #[test]
+    fn zero_filled_binary_rejected_as_document() {
+        let mut t = task_for("https://x.example/blob");
+        t.kind = TaskKind::DocumentFile;
+        // NUL-heavy bytes fail both the NUL check and the printable ratio...
+        assert!(verify_magic_bytes(&t, &[0u8; 64]).is_err());
+        // ...and random control-byte soup fails the ratio.
+        let soup: Vec<u8> = (0..=255u8).collect();
+        assert!(verify_magic_bytes(&t, &soup).is_err());
+    }
+
+    #[test]
+    fn text_head_still_rejected_for_audio_tasks() {
+        // Text sniffing is DocumentFile-only; a fake .mp3 stays rejected.
+        let t = task_for("https://x.example/fake.mp3");
+        assert!(verify_magic_bytes(&t, b"just words, no music\n").is_err());
+    }
+
+    /// Regression for the twin-truncation corruption: once the download
+    /// finishes, the staging file must have left the shared `.part` name
+    /// (rename-under-lock) so a redelivered twin cannot truncate it
+    /// mid-classification. Checked at the filesystem level.
+    #[tokio::test]
+    async fn promoted_done_leaves_no_part_behind() {
+        let body = wav_bytes(35);
+        let (url, server) = spawn_one_shot_server(body).await;
+        let dir = std::env::temp_dir().join(format!("arachne-done-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = test_context(&dir).await;
+        let client = reqwest::Client::new();
+
+        let outcome = harvest_media(&ctx, &client, &task_for(&url)).await;
+        assert!(
+            matches!(outcome.status, CrawlStatus::Success),
+            "{:?} {:?}",
+            outcome.status,
+            outcome.error
+        );
+
+        let parts = PathBuf::from(&ctx.config.media.store_dir).join("parts");
+        let leftovers: Vec<PathBuf> = std::fs::read_dir(&parts)
+            .expect("parts dir exists")
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|ext| ext == "part"))
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "staging stayed in shared .part namespace after completion: {leftovers:?}"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = server.await;
+    }
+
+    #[test]
+    fn parse_content_range_start_handles_valid_full_form() {
+        assert_eq!(
+            parse_content_range_start(Some("bytes 123-456/789")),
+            Some(123)
+        );
+        assert_eq!(
+            parse_content_range_start(Some("bytes 0-0/1")),
+            Some(0),
+            "start offset zero is a real value"
+        );
+    }
+
+    #[test]
+    fn parse_content_range_start_unsatisfied_and_garbage() {
+        // Unsatisfied form: no range exists to resume from.
+        assert_eq!(parse_content_range_start(Some("bytes */1000")), None);
+        // Wrong unit / malformed.
+        assert_eq!(parse_content_range_start(Some("items 5-9/10")), None);
+        assert_eq!(parse_content_range_start(Some("bytes ")), None);
+        assert_eq!(parse_content_range_start(Some("bytes x-9/10")), None);
+        assert_eq!(parse_content_range_start(Some("")), None);
+        // Missing header.
+        assert_eq!(parse_content_range_start(None), None);
+    }
+
+    #[test]
+    fn resume_aligned_accepts_only_matching_start() {
+        assert!(resume_aligned(Some("bytes 4096-8191/99999"), 4096));
+        assert!(
+            !resume_aligned(Some("bytes 2048-8191/99999"), 4096),
+            "mismatching start means the remote content changed; must restart"
+        );
+        assert!(
+            !resume_aligned(Some("bytes */1000"), 4096),
+            "unsatisfied form cannot prove alignment"
+        );
+        assert!(
+            !resume_aligned(None, 4096),
+            "missing header fails closed (non-compliant server)"
+        );
+        assert!(!resume_aligned(Some("bytes 4096-8191/99999"), 0));
+    }
+
+    /// Regression for the frankenfile corruption: a stale .part prefix plus a
+    /// misaligned 206 must NOT be hashed/appended — the reset path runs
+    /// instead. Drives `run` against a scripted server that replies 206 with
+    /// a Content-Range starting before our resume offset.
+    #[tokio::test]
+    async fn mismatched_content_range_restarts_from_scratch() {
+        use tokio::io::AsyncWriteExt;
+
+        let body = wav_bytes(35);
+        let dir = std::env::temp_dir().join(format!("arachne-resume-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = test_context(&dir).await;
+        let client = reqwest::Client::new();
+
+        // Pre-seed the primary staging file with a stale prefix (as a prior,
+        // interrupted attempt would have left it). The attempt below then
+        // takes the Owned/resume path rather than the nonce fallback.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/stale.wav");
+        let task = task_for(&url);
+
+        let mut h = Sha256::new();
+        h.update(task.url.as_bytes());
+        let staging_key = hex::encode(h.finalize())[..24].to_string();
+        let part = PathBuf::from(&ctx.config.media.store_dir)
+            .join("parts")
+            .join(format!("{staging_key}.part"));
+        tokio::fs::create_dir_all(part.parent().unwrap())
+            .await
+            .unwrap();
+        // Stale prefix that no longer matches the (rewritten) remote object.
+        let mut pf = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&part)
+            .await
+            .unwrap();
+        let stale_prefix = vec![0xEEu8; 1024];
+        pf.write_all(&stale_prefix).await.unwrap();
+        pf.flush().await.unwrap();
+        drop(pf);
+
+        // One-shot 206 whose Content-Range start (512) disagrees with the
+        // on-disk prefix length (1024): the frankenfile trigger.
+        let body_len = body.len() as u64;
+        let served = body.clone();
+        let handle = tokio::task::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 || String::from_utf8_lossy(&buf[..n]).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\n\
+                     Content-Range: bytes 512-{}/{body_len}\r\nContent-Length: {body_len}\r\n\
+                     Connection: close\r\n\r\n",
+                    body_len - 1
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&served).await;
+                let _ = sock.flush().await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let outcome = harvest_media(&ctx, &client, &task).await;
+        let _ = handle.await;
+        assert!(
+            matches!(outcome.status, CrawlStatus::Success),
+            "restart path must still complete: {:?} {:?}",
+            outcome.status,
+            outcome.error
+        );
+        // Full fresh download: byte count is the whole body, not prefix+body.
+        assert_eq!(outcome.bytes as usize, body.len());
+
+        // The committed bytes are exactly the served body — no 0xEE splice.
+        let stored = outcome.stored.expect("stored");
+        let fs_path = stored.fs_path.as_ref().expect("local fs path");
+        let committed = std::fs::read(fs_path).unwrap();
+        assert_eq!(
+            committed, body,
+            "frankenfile: stale prefix leaked into commit"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The aligned case still resumes: a matching Content-Range start keeps
+    /// the prefix and reports prefix+suffix bytes.
+    #[tokio::test]
+    async fn matched_content_range_still_resumes_prefix() {
+        use tokio::io::AsyncWriteExt;
+
+        let body = wav_bytes(35);
+        let dir = std::env::temp_dir().join(format!("arachne-resume-ok-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let ctx = test_context(&dir).await;
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = format!("http://{addr}/resume.wav");
+        let task = task_for(&url);
+
+        let mut h = Sha256::new();
+        h.update(task.url.as_bytes());
+        let staging_key = hex::encode(h.finalize())[..24].to_string();
+        let part = PathBuf::from(&ctx.config.media.store_dir)
+            .join("parts")
+            .join(format!("{staging_key}.part"));
+        tokio::fs::create_dir_all(part.parent().unwrap())
+            .await
+            .unwrap();
+        let prefix_len = 1024usize;
+        let mut pf = tokio::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&part)
+            .await
+            .unwrap();
+        pf.write_all(&body[..prefix_len]).await.unwrap();
+        pf.flush().await.unwrap();
+        drop(pf);
+
+        // Compliant 206 continuing exactly at the prefix length.
+        let suffix = body[prefix_len..].to_vec();
+        let suffix_len = suffix.len() as u64;
+        let total = body.len() as u64;
+        let handle = tokio::task::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                let mut buf = [0u8; 4096];
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 || String::from_utf8_lossy(&buf[..n]).contains("\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = format!(
+                    "HTTP/1.1 206 Partial Content\r\nContent-Type: audio/wav\r\n\
+                     Content-Range: bytes {prefix_len}-{}/{total}\r\nContent-Length: {suffix_len}\r\n\
+                     Connection: close\r\n\r\n",
+                    total - 1
+                );
+                let _ = sock.write_all(head.as_bytes()).await;
+                let _ = sock.write_all(&suffix).await;
+                let _ = sock.flush().await;
+                let _ = sock.shutdown().await;
+            }
+        });
+
+        let client = reqwest::Client::new();
+        let outcome = harvest_media(&ctx, &client, &task).await;
+        let _ = handle.await;
+        assert!(
+            matches!(outcome.status, CrawlStatus::Success),
+            "{:?} {:?}",
+            outcome.status,
+            outcome.error
+        );
+        // Resume accounting covers prefix + streamed suffix.
+        assert_eq!(outcome.bytes as usize, body.len());
+        let stored = outcome.stored.expect("stored");
+        let fs_path = stored.fs_path.as_ref().expect("local fs path");
+        let committed = std::fs::read(fs_path).unwrap();
+        assert_eq!(committed, body, "resumed file must equal the full body");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

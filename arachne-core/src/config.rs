@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use figment::{
-    providers::{Env, Format, Toml},
     Figment,
+    providers::{Env, Format, Toml},
 };
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +25,12 @@ pub struct ArachneConfig {
 impl ArachneConfig {
     /// Load configuration from defaults, an optional TOML file, and environment variables.
     pub fn load(config_path: Option<&str>) -> Result<Self> {
+        // Best-effort .env pickup: makes the documented "copy example.env to
+        // .env" setup actually take effect. dotenvy never overrides variables
+        // already present in the process env, and the Env provider merges
+        // last below, so precedence stays real-env > .env > TOML > defaults.
+        dotenvy::dotenv().ok();
+
         let mut figment = Figment::new().merge(figment::providers::Serialized::defaults(
             ArachneConfig::default(),
         ));
@@ -142,7 +148,6 @@ impl Default for WorkerConfig {
 pub struct CoordinatorConfig {
     pub max_pages_per_domain: i64,
     pub batch_size: usize,
-    pub batch_timeout_ms: u64,
     pub dedup_bloom_capacity: u64,
     pub dedup_bloom_fp_rate: f64,
 }
@@ -152,7 +157,6 @@ impl Default for CoordinatorConfig {
         Self {
             max_pages_per_domain: 1000,
             batch_size: 256,
-            batch_timeout_ms: 200,
             dedup_bloom_capacity: 10_000_000,
             dedup_bloom_fp_rate: 0.001,
         }
@@ -184,7 +188,6 @@ impl Default for PolitenessConfig {
 pub struct StorageConfig {
     pub content_dir: String,
     pub store_raw_html: bool,
-    pub store_extracted_text: bool,
 }
 
 impl Default for StorageConfig {
@@ -192,7 +195,6 @@ impl Default for StorageConfig {
         Self {
             content_dir: "./crawled_data".to_string(),
             store_raw_html: false,
-            store_extracted_text: true,
         }
     }
 }

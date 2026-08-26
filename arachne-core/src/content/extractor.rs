@@ -89,13 +89,13 @@ pub fn extract_links(document: &Html, base_url: &Url) -> Vec<String> {
     let mut links = Vec::new();
 
     for element in document.select(&a_selector) {
-        if let Some(href) = element.value().attr("href") {
-            if let Ok(resolved) = base_url.join(href) {
-                // Ignore fragment
-                let mut url = resolved;
-                url.set_fragment(None);
-                links.push(url.to_string());
-            }
+        if let Some(href) = element.value().attr("href")
+            && let Ok(resolved) = base_url.join(href)
+        {
+            // Ignore fragment
+            let mut url = resolved;
+            url.set_fragment(None);
+            links.push(url.to_string());
         }
     }
 

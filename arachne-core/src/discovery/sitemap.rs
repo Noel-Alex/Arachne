@@ -1,8 +1,8 @@
 //! Sitemap (and sitemap-index) parsing via streaming quick-xml.
 
 use anyhow::{Context, Result};
-use quick_xml::events::Event;
 use quick_xml::Reader;
+use quick_xml::events::Event;
 
 /// One URL entry from a `<urlset>` sitemap.
 #[derive(Debug, Clone, PartialEq)]
@@ -47,8 +47,9 @@ pub fn parse_sitemap(xml: &[u8]) -> Result<Sitemap> {
             }
             Ok(Event::Text(t)) => {
                 if current_tag.is_some() {
-                    current_text
-                        .push_str(&String::from_utf8_lossy(t.unescape().unwrap_or_default().as_bytes()));
+                    current_text.push_str(&String::from_utf8_lossy(
+                        t.unescape().unwrap_or_default().as_bytes(),
+                    ));
                 }
             }
             Ok(Event::End(e)) => {
@@ -126,5 +127,31 @@ mod tests {
                 "https://a.com/sm2.xml".into()
             ])
         );
+    }
+
+    #[test]
+    fn parses_mixed_blocks_and_namespace() {
+        // Namespaced root plus both block kinds in one document: any
+        // child_maps win, so Index takes precedence over collected URLs.
+        let xml = br#"<?xml version="1.0" encoding="UTF-8"?>
+        <urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+            <url><loc>https://a.com/page</loc><lastmod>2026-02-02</lastmod></url>
+            <sitemap><loc>/child-map.xml</loc></sitemap>
+        </urlset>"#;
+        let parsed = parse_sitemap(xml).unwrap();
+        assert_eq!(parsed, Sitemap::Index(vec!["/child-map.xml".to_string()]));
+    }
+
+    #[test]
+    fn malformed_xml_is_err() {
+        // Genuinely broken markup (mismatched end tag) surfaces as Err.
+        assert!(parse_sitemap(b"<urlset><url></urlset>").is_err());
+
+        // Known gap: input that merely ends early (unclosed elements, no
+        // closing tags at all) is silently accepted — quick-xml emits Eof
+        // without an error, so this parses as an empty Urlset. Pinned so
+        // a switch to strict parsing is a deliberate change.
+        let truncated = parse_sitemap(b"<urlset><url><loc>unterminated");
+        assert_eq!(truncated.unwrap(), Sitemap::Urlset(Vec::new()));
     }
 }

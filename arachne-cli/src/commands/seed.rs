@@ -1,10 +1,10 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use arachne_core::config::ArachneConfig;
-use arachne_core::models::CrawlTask;
+use arachne_core::db::ArachneRepo;
+use arachne_core::models::{CrawlJob, CrawlTask, JobStatus};
 use arachne_core::nats::NatsManager;
 use std::io::{self, BufRead};
 use tracing::info;
-use uuid::Uuid;
 
 /// Seed URLs into the crawl queue.
 pub async fn run(
@@ -59,26 +59,47 @@ pub async fn run(
         return Ok(());
     }
 
-    // Generate a job ID for this seed batch
-    let job_id = Uuid::new_v4();
-    info!(job_id = %job_id, count = all_urls.len(), label = %label, "Seeding URLs");
+    // Normalize up front so the job row only ever lists usable seeds.
+    let mut seeds = Vec::new();
+    for url_str in &all_urls {
+        match arachne_core::domain::normalize_url(url_str) {
+            Some(u) => seeds.push(u),
+            None => tracing::warn!(url = %url_str, "Skipping invalid URL"),
+        }
+    }
+
+    info!(count = all_urls.len(), label = %label, "Seeding URLs");
+
+    // Same rule as crawl: never insert a Running job row with no tasks.
+    if seeds.is_empty() {
+        anyhow::bail!("no valid seed URLs");
+    }
+
+    // Seeded batches get a real job row so their results stay trackable via
+    // `arachne status` and remain exempt from the robots policy; seeding into
+    // thin air would orphan every task published below.
+    let db = ArachneRepo::new(&config)
+        .await
+        .context("Cannot reach database; seeding requires a persisted job row for tracking")?;
+
+    let job = CrawlJob {
+        name: label.clone(),
+        status: JobStatus::Running,
+        seed_urls: seeds.clone(),
+        ..Default::default()
+    };
+
+    // Persist before publishing so tasks can never outlive a missing job row.
+    db.insert_job(&job).await?;
 
     let mut success_count = 0;
-    for url_str in &all_urls {
-        let normalized = match arachne_core::domain::normalize_url(url_str) {
-            Some(u) => u,
-            None => {
-                tracing::warn!(url = %url_str, "Skipping invalid URL");
-                continue;
-            }
-        };
-
-        let domain = arachne_core::domain::extract_root_domain(&normalized)
-            .unwrap_or_else(|| "unknown".to_string());
+    for url in &seeds {
+        let domain =
+            arachne_core::domain::extract_root_domain(url).unwrap_or_else(|| "unknown".to_string());
 
         let task = CrawlTask {
-            url: normalized,
-            job_id,
+            url: url.clone(),
+            job_id: job.id,
             domain,
             depth: 0,
             priority: 100, // Seeds get highest priority
@@ -93,8 +114,9 @@ pub async fn run(
     info!(
         seeded = success_count,
         skipped = all_urls.len() - success_count,
+        job_id = %job.id,
         "Seeding complete"
     );
-    println!("✔ Seeded {} URLs (job: {})", success_count, job_id);
+    println!("✔ Seeded {} URLs (job: {})", success_count, job.id);
     Ok(())
 }

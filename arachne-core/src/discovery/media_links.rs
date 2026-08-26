@@ -22,8 +22,7 @@ fn last_path_extension(url: &str) -> Option<&str> {
 }
 
 fn matches_any(url: &str, exts: &[&str]) -> bool {
-    last_path_extension(url)
-        .is_some_and(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+    last_path_extension(url).is_some_and(|ext| exts.iter().any(|e| ext.eq_ignore_ascii_case(e)))
 }
 
 /// True when a URL path ends in a known video extension.
@@ -39,11 +38,7 @@ pub fn has_document_extension(url: &str) -> bool {
 /// Find anchors whose href passes `pred`, resolved against `base`. Deduped,
 /// order preserved. Used by the worker to emit video/document candidates
 /// alongside audio links.
-pub fn links_by_extension(
-    html: &str,
-    base: &url::Url,
-    pred: fn(&str) -> bool,
-) -> Vec<String> {
+pub fn links_by_extension(html: &str, base: &url::Url, pred: fn(&str) -> bool) -> Vec<String> {
     let doc = scraper::Html::parse_document(html);
     let mut found: Vec<String> = Vec::new();
     for el in doc.tree.nodes().filter_map(|n| n.value().as_element()) {

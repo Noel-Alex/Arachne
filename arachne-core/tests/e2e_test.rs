@@ -73,9 +73,11 @@ async fn test_e2e_pipeline_components() -> Result<()> {
     assert_eq!(extracted.language.as_deref(), Some("en"));
     assert!(extracted.text_content.contains("Welcome to Arachne"));
     assert_eq!(extracted.links.len(), 2);
-    assert!(extracted
-        .links
-        .contains(&"https://example.com/docs".to_string()));
+    assert!(
+        extracted
+            .links
+            .contains(&"https://example.com/docs".to_string())
+    );
 
     // 7. Task & Result Models
     let job_id = Uuid::new_v4();

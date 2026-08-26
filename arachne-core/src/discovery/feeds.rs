@@ -77,7 +77,10 @@ mod tests {
         assert_eq!(entries[0].link.as_deref(), Some("https://ex.com/ep1"));
         assert_eq!(
             entries[0].enclosures,
-            vec![("https://ex.com/audio/ep1.mp3".to_string(), "audio/mpeg".to_string())]
+            vec![(
+                "https://ex.com/audio/ep1.mp3".to_string(),
+                "audio/mpeg".to_string()
+            )]
         );
         assert!(is_audio_mime("audio/mpeg"));
         assert!(!is_audio_mime("text/html"));

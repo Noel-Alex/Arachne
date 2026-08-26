@@ -52,10 +52,104 @@ pub fn write_attribution(tracks: &[TrackRecord], path: &Path) -> Result<()> {
                 writeln!(w, "  Album: {album}")?;
             }
             writeln!(w, "  Source: {} id={}", t.source, t.source_id)?;
+            if let Some(origin) = &t.origin_page_url {
+                writeln!(w, "  Origin: {origin}")?;
+            }
+            match &t.license_url {
+                Some(deed) => writeln!(w, "  License: {} ({deed})", t.license)?,
+                None => writeln!(w, "  License: {}", t.license)?,
+            }
             writeln!(w, "  URL: {}", t.url)?;
         }
         writeln!(w)?;
     }
 
+    // License-terms footer: one line per distinct license, first deed URL
+    // actually present in the data (never invented), or a pointer back to the
+    // source catalog when no URL is known.
+    writeln!(w, "LICENSE TERMS")?;
+    writeln!(w, "=============")?;
+    for (license, group) in &by_license {
+        let deed = group.iter().find_map(|t| t.license_url.as_deref());
+        match deed {
+            Some(url) => writeln!(w, "{license}: {url}")?,
+            None => writeln!(w, "{license}: see source catalog")?,
+        }
+    }
+
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use uuid::Uuid;
+
+    fn track(license: &str, license_url: Option<&str>, origin: Option<&str>) -> TrackRecord {
+        TrackRecord {
+            source: "jamendo".into(),
+            source_id: format!("id-{license}"),
+            job_id: Uuid::new_v4(),
+            url: "https://example.com/a.mp3".into(),
+            title: Some("Test Track".into()),
+            artist: Some("Test Artist".into()),
+            album: None,
+            year: None,
+            genre: None,
+            license: license.into(),
+            license_url: license_url.map(String::from),
+            origin_page_url: origin.map(String::from),
+            discovered_from_url: None,
+            collection: None,
+            duration_secs: None,
+            bitrate_kbps: None,
+            format: None,
+            sha256: None,
+            bytes: None,
+            object_path: None,
+            status: arachne_core::models::TrackStatus::Done,
+            error: None,
+        }
+    }
+
+    #[test]
+    fn emits_origin_license_and_terms_footer() {
+        let tracks = vec![
+            track(
+                "cc-by-40",
+                Some("https://creativecommons.org/licenses/by/4.0/"),
+                Some("https://www.jamendo.com/track/1"),
+            ),
+            track("cc0-10", None, None),
+        ];
+
+        let path =
+            std::env::temp_dir().join(format!("arachne-attribution-test-{}.txt", Uuid::new_v4()));
+        write_attribution(&tracks, &path).expect("attribution write succeeds");
+        let out = std::fs::read_to_string(&path).expect("read back");
+        let _ = std::fs::remove_file(&path);
+
+        assert!(out.contains("LICENSE TERMS"), "terms footer present");
+        assert!(
+            out.contains("cc-by-40: https://creativecommons.org/licenses/by/4.0/"),
+            "deed URL printed verbatim from data"
+        );
+        assert!(
+            out.contains("cc0-10: see source catalog"),
+            "URL-less license falls back to catalog pointer"
+        );
+        assert!(
+            out.contains("Origin: https://www.jamendo.com/track/1"),
+            "per-track origin URL present"
+        );
+        assert!(
+            out.contains("License: cc-by-40 (https://creativecommons.org/licenses/by/4.0/)"),
+            "per-track license carries its deed"
+        );
+        assert!(
+            out.contains("License: cc0-10\n"),
+            "URL-less license renders bare"
+        );
+        assert!(out.contains("Source: jamendo id="), "source id kept");
+    }
 }

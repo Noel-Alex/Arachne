@@ -2,6 +2,28 @@
 
 All notable changes to Arachne are documented here. Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/); versioning follows [SemVer](https://semver.org/) at the workspace level.
 
+## [Unreleased]
+
+### Added
+- **Sitemap & RSS/Atom feed discovery wired end-to-end**: crawled pages classify their own links into sitemap/feed candidates (`discovery::wire`), fetch them robots-respected and hard-capped (3+3 probes per page, 10s timeout, 5MB bodies, one index recursion level), and fold child page URLs plus audio enclosures back into discovery so they flow through coordinator admission like any other URL.
+- **Job policy enforcement at admission**: `follow_external_links = false` now gates candidates by seed-root lineage (ASCII-case-insensitive root-domain match against the job's parsed seeds); `job.max_pages_per_domain` enforced on top of the global per-domain cap.
+- **Live coordinator gauges**: `arachne_frontier_size` (CRAWL_TASKS stream depth) and `arachne_jobs_running`, refreshed every 15s; worker page-size histogram `arachne_page_size_bytes`.
+- **Browser-style charset cascade** for page decoding: Content-Type header charset → BOM sniff → `<meta charset>`/http-equiv scan of the first 2048 bytes → UTF-8 with replacement.
+- Stable content ids for organically-discovered media: SHA-256 of the URL (first 16 hex chars) instead of the unspecified `DefaultHasher` algorithm.
+
+### Fixed
+- **Video files keep their sniffed container extension** (mp4/m4v/mov): ISO-BMFF ftyp boxes no longer mislabel real video as `.m4a`; audio tasks on the shared container still get `.m4a`.
+- **m4a and Ogg-Opus magic bytes actually recognized**: verification tokens updated to infer 0.16's real mime strings (`audio/m4a`, `audio/opus`, `audio/x-wav`, `audio/x-flac`) — genuine files that were quarantined now pass.
+- **FMA bulk-zip tasks store as zip**: subset-archive tasks (`source_id` ending `-archive`) accept `application/zip` payloads and commit to the store instead of quarantining a multi-GB download after transfer; probing is skipped for them.
+- **Disk quota no longer double-counts dedup hits**: only newly-committed bytes increment the total-bytes counter; dedup-skip resolves existing store paths.
+- **Postgres admission hot path is single-round-trip**: batch URL checks and result inserts use unnest-array statements joined against the table (pinned by tests), instead of per-row queries.
+- **CLI robustness**: UTF-8-safe truncation in status output (`char_indices` boundaries), RFC-compliant CSV escaping in export, nonzero exit with the valid list on an unknown `harvest -s` source.
+
+### Security
+- **Redirect-following egress bypass closed**: the worker's reqwest client now uses `guarded_redirect_policy`, re-validating EVERY 30x hop through the static SSRF guard (`arachne-core/src/egress.rs`) — previously `Policy::limited(n)` followed redirects to any host while only the original URL was checked.
+- **SSRF guard widened**: IPv4-mapped IPv6 addresses (::ffff:0:0/96) re-checked against IPv4 rules, unique-local fc00::/7, link-local fe80::/10, and "this network" 0.0.0.0/8 blocked alongside loopback/private/link-local/cloud-metadata ranges and non-standard ports.
+- SECURITY.md supported-versions row updated (2.1.x).
+
 ## [2.1.0] - 2026-08-24
 
 ### Added

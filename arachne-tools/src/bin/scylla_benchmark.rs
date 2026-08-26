@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
                     crawl_duration_ms: 45,
                     crawled_at: Utc::now(),
                     media_meta: None,
-        media_probe: None,
+                    media_probe: None,
                 };
 
                 batch.push((domain, result));

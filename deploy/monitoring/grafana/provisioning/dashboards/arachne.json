@@ -14,17 +14,26 @@
       "description": "Currently in-flight crawl tasks across all workers.",
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 0, "y": 0 },
-      "targets": [{ "expr": "arachne_active_tasks", "legendFormat": "active" }],
+      "targets": [
+        { "expr": "arachne_active_tasks{component=\"worker\"}", "legendFormat": "active" }
+      ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
     {
       "id": 2,
       "title": "Pages Crawled / Failed",
+      "description": "Coordinator counts — fleet truth (workers double-count their own local tally).",
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 4, "y": 0 },
       "targets": [
-        { "expr": "sum(arachne_pages_crawled_total)", "legendFormat": "crawled" },
-        { "expr": "sum(arachne_pages_failed_total)", "legendFormat": "failed" }
+        {
+          "expr": "sum(arachne_pages_crawled_total{component=\"coordinator\"})",
+          "legendFormat": "crawled"
+        },
+        {
+          "expr": "sum(arachne_pages_failed_total{component=\"coordinator\"})",
+          "legendFormat": "failed"
+        }
       ],
       "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     },
@@ -34,7 +43,12 @@
       "description": "Files that passed probe + quality gates.",
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 8, "y": 0 },
-      "targets": [{ "expr": "sum(arachne_audio_harvested_total)", "legendFormat": "harvested" }],
+      "targets": [
+        {
+          "expr": "sum(arachne_audio_harvested_total{component=\"worker\"})",
+          "legendFormat": "harvested"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -50,8 +64,14 @@
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 12, "y": 0 },
       "targets": [
-        { "expr": "sum(arachne_audio_rejected_total)", "legendFormat": "rejected" },
-        { "expr": "sum(arachne_audio_failed_total)", "legendFormat": "failed" }
+        {
+          "expr": "sum(arachne_audio_rejected_total{component=\"worker\"})",
+          "legendFormat": "rejected"
+        },
+        {
+          "expr": "sum(arachne_audio_failed_total{component=\"worker\"})",
+          "legendFormat": "failed"
+        }
       ],
       "fieldConfig": {
         "defaults": {
@@ -65,7 +85,12 @@
       "title": "Bytes Downloaded",
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 16, "y": 0 },
-      "targets": [{ "expr": "sum(arachne_bytes_downloaded_total)", "legendFormat": "bytes" }],
+      "targets": [
+        {
+          "expr": "sum(arachne_bytes_downloaded_total{component=\"worker\"})",
+          "legendFormat": "bytes"
+        }
+      ],
       "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] }
     },
     {
@@ -74,7 +99,12 @@
       "description": "Poison pills acked to avoid redelivery loops — should stay at 0.",
       "type": "stat",
       "gridPos": { "h": 5, "w": 4, "x": 20, "y": 0 },
-      "targets": [{ "expr": "sum(arachne_messages_malformed_total)", "legendFormat": "malformed" }],
+      "targets": [
+        {
+          "expr": "sum by(component)(arachne_messages_malformed_total)",
+          "legendFormat": "{{component}}"
+        }
+      ],
       "fieldConfig": {
         "defaults": {
           "unit": "short",
@@ -92,11 +122,18 @@
     {
       "id": 7,
       "title": "Crawl Throughput (pages/s)",
+      "description": "Coordinator counts — fleet truth.",
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 5 },
       "targets": [
-        { "expr": "rate(arachne_pages_crawled_total[1m])", "legendFormat": "success" },
-        { "expr": "rate(arachne_pages_failed_total[1m])", "legendFormat": "failed" }
+        {
+          "expr": "sum(rate(arachne_pages_crawled_total{component=\"coordinator\"}[1m]))",
+          "legendFormat": "success"
+        },
+        {
+          "expr": "sum(rate(arachne_pages_failed_total{component=\"coordinator\"}[1m]))",
+          "legendFormat": "failed"
+        }
       ],
       "fieldConfig": { "defaults": { "unit": "ops", "custom": { "fillOpacity": 10 } }, "overrides": [] }
     },
@@ -106,8 +143,15 @@
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 12, "y": 5 },
       "targets": [
-        { "expr": "sum(rate(arachne_audio_harvested_total[1m]))", "legendFormat": "audio files/s" },
-        { "expr": "sum(rate(arachne_bytes_downloaded_total[1m]))", "legendFormat": "bytes/s", "hide": false }
+        {
+          "expr": "sum(rate(arachne_audio_harvested_total{component=\"worker\"}[1m]))",
+          "legendFormat": "audio files/s"
+        },
+        {
+          "expr": "sum(rate(arachne_bytes_downloaded_total{component=\"worker\"}[1m]))",
+          "legendFormat": "bytes/s",
+          "hide": false
+        }
       ],
       "fieldConfig": { "defaults": { "custom": { "fillOpacity": 10 } }, "overrides": [] }
     },
@@ -118,8 +162,14 @@
       "type": "timeseries",
       "gridPos": { "h": 8, "w": 12, "x": 0, "y": 13 },
       "targets": [
-        { "expr": "rate(arachne_urls_discovered_total[1m])", "legendFormat": "discovered" },
-        { "expr": "rate(arachne_urls_deduped_total[1m])", "legendFormat": "deduped" }
+        {
+          "expr": "sum(rate(arachne_urls_discovered_total{component=\"coordinator\"}[1m]))",
+          "legendFormat": "discovered"
+        },
+        {
+          "expr": "sum(rate(arachne_urls_deduped_total{component=\"coordinator\"}[1m]))",
+          "legendFormat": "deduped"
+        }
       ],
       "fieldConfig": { "defaults": { "unit": "ops" }, "overrides": [] }
     },
@@ -140,6 +190,34 @@
         }
       ],
       "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] }
+    },
+    {
+      "id": 11,
+      "title": "Frontier Size",
+      "description": "Tasks-stream depth from the coordinator gauge.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        {
+          "expr": "arachne_frontier_size{component=\"coordinator\"}",
+          "legendFormat": "queued"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 12,
+      "title": "Jobs Running",
+      "description": "Currently running jobs from the coordinator gauge.",
+      "type": "timeseries",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        {
+          "expr": "arachne_jobs_running{component=\"coordinator\"}",
+          "legendFormat": "running"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
     }
   ]
 }

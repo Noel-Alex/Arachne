@@ -1,3 +1,5 @@
+//! Storage layer: backend facade ([`ArachneRepo`]), PostgreSQL + legacy ScyllaDB implementations.
+
 pub mod backend;
 pub mod postgres;
 pub mod repo;

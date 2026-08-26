@@ -154,6 +154,11 @@ enum Commands {
         /// Include pending/failed/rejected tracks too (default exports done-only)
         #[arg(long)]
         include_incomplete: bool,
+
+        /// Export every license, including non-redistributable ones
+        /// (default exports redistributable licenses only)
+        #[arg(long)]
+        all_licenses: bool,
     },
 
     /// Inspect domain information
@@ -227,14 +232,16 @@ async fn main() -> Result<()> {
             limit,
             jamendo_client_id,
             contact,
-        } => {
-            commands::harvest::run(config, source, limit, jamendo_client_id, contact).await
-        }
+        } => commands::harvest::run(config, source, limit, jamendo_client_id, contact).await,
         Commands::TracksExport {
             source,
             output,
             include_incomplete,
-        } => commands::tracks_export::run(config, source, output, include_incomplete).await,
+            all_licenses,
+        } => {
+            commands::tracks_export::run(config, source, output, include_incomplete, all_licenses)
+                .await
+        }
         Commands::Inspect { domain } => commands::inspect::run(config, domain).await,
     }
 }

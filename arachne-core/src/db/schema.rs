@@ -7,15 +7,15 @@ use scylla::Session;
 pub async fn setup_schema(session: &Session) -> Result<()> {
     // Keyspace
     session
-        .query(
+        .query_unpaged(
             "CREATE KEYSPACE IF NOT EXISTS arachne WITH REPLICATION = { 'class' : 'SimpleStrategy', 'replication_factor' : 1 } AND TABLETS = { 'enabled' : false }",
-            &[],
+            (),
         )
         .await?;
 
     // crawl_jobs
     session
-        .query(
+        .query_unpaged(
             "CREATE TABLE IF NOT EXISTS arachne.crawl_jobs (
                 job_id uuid PRIMARY KEY,
                 name text,
@@ -24,13 +24,13 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 created_at bigint,
                 updated_at bigint
             )",
-            &[],
+            (),
         )
         .await?;
 
     // crawled_pages (Job-scoped primary key for recrawl history and multi-job isolation)
     session
-        .query(
+        .query_unpaged(
             "CREATE TABLE IF NOT EXISTS arachne.crawled_pages (
                 domain text,
                 job_id uuid,
@@ -46,13 +46,13 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 crawl_duration_ms int,
                 PRIMARY KEY ((domain), job_id, url)
             )",
-            &[],
+            (),
         )
         .await?;
 
     // domain_metadata
     session
-        .query(
+        .query_unpaged(
             "CREATE TABLE IF NOT EXISTS arachne.domain_metadata (
                 domain text PRIMARY KEY,
                 robots_txt text,
@@ -60,7 +60,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 crawl_delay_ms int,
                 last_crawled_at bigint
             )",
-            &[],
+            (),
         )
         .await?;
 
@@ -68,7 +68,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
     // status: pending | downloading | done | rejected | failed.
     // leased_until: crash-recovery lease timestamp.
     session
-        .query(
+        .query_unpaged(
             "CREATE TABLE IF NOT EXISTS arachne.tracks (
                 source text,
                 source_id text,
@@ -96,7 +96,7 @@ pub async fn setup_schema(session: &Session) -> Result<()> {
                 updated_at bigint,
                 PRIMARY KEY ((source), source_id)
             )",
-            &[],
+            (),
         )
         .await?;
 

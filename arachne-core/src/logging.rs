@@ -1,6 +1,6 @@
 //! Structured logging initialization.
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 /// Initialize structured logging for the application.
 pub fn init_logging() {

@@ -32,6 +32,8 @@ pub struct JamendoConfig {
     /// Milliseconds between metadata API pages (35k req/month free tier ≈ 13ms
     /// sustained; we stay far below at ~2/s).
     pub page_delay_ms: u64,
+    /// Contact address baked into the User-Agent (charter §UA).
+    pub contact: Option<String>,
 }
 
 impl JamendoConfig {
@@ -42,7 +44,23 @@ impl JamendoConfig {
             page_size: 200,
             max_tracks: None,
             page_delay_ms: 500,
+            contact: None,
         }
+    }
+}
+
+/// Charter-mandated UA: `ArachneBot/{version} (+{repo_url}; contact={c})`,
+/// repo URL alone when no contact is configured.
+fn user_agent(contact: Option<&str>) -> String {
+    match contact {
+        Some(c) => format!(
+            "ArachneBot/{} (+https://github.com/Noel-Alex/Arachne; contact={c})",
+            env!("CARGO_PKG_VERSION")
+        ),
+        None => format!(
+            "ArachneBot/{} (+https://github.com/Noel-Alex/Arachne)",
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 
@@ -98,6 +116,12 @@ fn download_url(track_id: &str, fmt: &str) -> String {
     format!("https://prod-1.storage.jamendo.com/download/track/{track_id}/{fmt}/")
 }
 
+/// Seconds to wait before the `retry`-th re-attempt of an over-quota page.
+/// Fixed minute-ladder because Jamendo sends no reliable Retry-After header.
+fn quota_backoff_secs(retry: u32) -> u64 {
+    u64::from(retry) * 60
+}
+
 /// Walk the full catalog (id ascending), admitting pending manifest rows and
 /// publishing AudioFile tasks. Returns (admitted, skipped_existing).
 pub async fn harvest(
@@ -107,7 +131,7 @@ pub async fn harvest(
 ) -> Result<(u64, u64)> {
     let job_id = harvest_job_id();
     let client = reqwest::Client::builder()
-        .user_agent(concat!("ArachneBot/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent(cfg.contact.as_deref()))
         .build()?;
 
     let mut offset: u32 = 0;
@@ -116,10 +140,16 @@ pub async fn harvest(
     // Over-quota / transient-empty pages get retried with backoff before we
     // believe the walk is done.
     let mut consecutive_empty = 0u32;
+    // Successive over-quota pages (reset by any page WITH results); a quota
+    // wall mid-catalog is a pause, not end-of-catalog, so ride it out.
+    let mut quota_retries = 0u32;
 
     loop {
-        // Stop when the track cap is set and reached.
-        if cfg.max_tracks.is_some_and(|max| admitted_total >= max) {
+        // --limit bounds catalog walk, not just new admits: count every
+        // downloadable/licensed track processed (new or already present),
+        // or a re-run against a mostly-known catalog would walk all ~500k.
+        let seen = admitted_total + existing_total;
+        if cfg.max_tracks.is_some_and(|max| seen >= max) {
             break;
         }
 
@@ -133,10 +163,7 @@ pub async fn harvest(
                 ("order", "id_asc"),
                 // Default returns ONLY albumtracks; both kinds for completeness.
                 ("type", "single+albumtrack"),
-                (
-                    "audiodlformat",
-                    cfg.dl_format.as_str(),
-                ),
+                ("audiodlformat", cfg.dl_format.as_str()),
                 ("include", "licenses"),
             ])
             .send()
@@ -145,16 +172,37 @@ pub async fn harvest(
 
         let env: Envelope = resp.json().await.context("jamendo api bad json")?;
 
-        // Quota exhaustion masquerades as an empty success with a warning.
-        if env._headers.status != "success"
-            || (!env._headers.warnings.is_empty() && env.results.is_empty())
-        {
+        // Non-success is a real API problem: bail loudly.
+        if env._headers.status != "success" {
             anyhow::bail!(
                 "jamendo api problem: status={} warnings={} err={}",
                 env._headers.status,
                 env._headers.warnings,
                 env._headers.error_message
             );
+        }
+
+        // Quota exhaustion masquerades as an empty success with a warning.
+        // Per the module doc this is a backoff signal, never end-of-catalog:
+        // retry in place (offset untouched) on an escalating minute-ladder,
+        // and only give up once it persists across 5 attempts. Fixed ladder
+        // rather than a Retry-After hint because Jamendo sends none reliably.
+        if !env._headers.warnings.is_empty() && env.results.is_empty() {
+            if quota_retries >= 5 {
+                anyhow::bail!(
+                    "jamendo over quota after {quota_retries} backoffs at offset {offset}"
+                );
+            }
+            quota_retries += 1;
+            let secs = quota_backoff_secs(quota_retries);
+            warn!(
+                offset,
+                attempt = quota_retries,
+                backoff_secs = secs,
+                "jamendo over quota, backing off"
+            );
+            tokio::time::sleep(std::time::Duration::from_secs(secs)).await;
+            continue;
         }
 
         if env.results.is_empty() {
@@ -167,6 +215,7 @@ pub async fn harvest(
             continue;
         }
         consecutive_empty = 0;
+        quota_retries = 0;
 
         let page_len = env.results.len();
         let mut tasks = Vec::with_capacity(page_len);
@@ -252,5 +301,12 @@ mod tests {
             download_url("1848357", "flac"),
             "https://prod-1.storage.jamendo.com/download/track/1848357/flac/"
         );
+    }
+
+    #[test]
+    fn quota_backoff_ladder_is_minutes() {
+        assert_eq!(quota_backoff_secs(0), 0); // unreachable: counter pre-incremented
+        assert_eq!(quota_backoff_secs(1), 60);
+        assert_eq!(quota_backoff_secs(5), 300); // final attempt before bail
     }
 }

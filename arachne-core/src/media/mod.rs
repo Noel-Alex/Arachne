@@ -7,5 +7,5 @@
 pub mod probe;
 pub mod store;
 
-pub use probe::{probe_audio, AudioQuality, ProbeResult};
+pub use probe::{AudioQuality, ProbeResult, probe_audio};
 pub use store::MediaStore;

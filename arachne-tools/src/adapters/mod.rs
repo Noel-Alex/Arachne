@@ -69,7 +69,8 @@ pub fn build_task_and_record(
     };
 
     // Domain = the download host's root domain (drives politeness/sharding).
-    let domain = arachne_core::domain::extract_root_domain(&url).unwrap_or_else(|| "unknown".into());
+    let domain =
+        arachne_core::domain::extract_root_domain(&url).unwrap_or_else(|| "unknown".into());
 
     let task = CrawlTask {
         url,

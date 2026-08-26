@@ -41,6 +41,8 @@ pub struct FmaConfig {
     pub max_tracks: Option<u64>,
     /// Keep only redistributable licenses (exclude NC/ND variants).
     pub redistributable_only: bool,
+    /// Contact address baked into the User-Agent (charter §UA).
+    pub contact: Option<String>,
 }
 
 impl FmaConfig {
@@ -49,7 +51,23 @@ impl FmaConfig {
             subset: subset.into(),
             max_tracks: None,
             redistributable_only: true,
+            contact: None,
         }
+    }
+}
+
+/// Charter-mandated UA: `ArachneBot/{version} (+{repo_url}; contact={c})`,
+/// repo URL alone when no contact is configured.
+fn user_agent(contact: Option<&str>) -> String {
+    match contact {
+        Some(c) => format!(
+            "ArachneBot/{} (+https://github.com/Noel-Alex/Arachne; contact={c})",
+            env!("CARGO_PKG_VERSION")
+        ),
+        None => format!(
+            "ArachneBot/{} (+https://github.com/Noel-Alex/Arachne)",
+            env!("CARGO_PKG_VERSION")
+        ),
     }
 }
 
@@ -117,12 +135,19 @@ fn parse_tracks_csv_with_header(csv_text: &str) -> Result<Vec<FmaTrackRow>> {
     let id_row = &raw[id_row_idx];
     // Group labels live one row above (row 0 = groups, row 1 = sub-names) OR
     // the file may already be flattened; tolerate both.
-    let group_row = if id_row_idx >= 1 { &raw[id_row_idx - 1] } else { id_row };
+    let group_row = if id_row_idx >= 1 {
+        &raw[id_row_idx - 1]
+    } else {
+        id_row
+    };
 
     let idx_of = |group: &str, name: &str| -> Option<usize> {
         for (i, cell) in id_row.iter().enumerate() {
             let sub_matches = cell.eq_ignore_ascii_case(name);
-            let group_matches = group_row.get(i).map(|g| g.eq_ignore_ascii_case(group)).unwrap_or(false);
+            let group_matches = group_row
+                .get(i)
+                .map(|g| g.eq_ignore_ascii_case(group))
+                .unwrap_or(false);
             if sub_matches && (group_matches || group_row.len() <= i) {
                 return Some(i);
             }
@@ -148,7 +173,9 @@ fn parse_tracks_csv_with_header(csv_text: &str) -> Result<Vec<FmaTrackRow>> {
             Err(_) => continue,
         };
         let get = |i: Option<usize>| -> Option<String> {
-            i.and_then(|i| r.get(i)).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+            i.and_then(|i| r.get(i))
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
         };
         out.push(FmaTrackRow {
             track_id,
@@ -156,7 +183,9 @@ fn parse_tracks_csv_with_header(csv_text: &str) -> Result<Vec<FmaTrackRow>> {
             artist: get(i_artist).unwrap_or_default(),
             album: get(i_album).unwrap_or_default(),
             duration_secs: get(i_dur).and_then(|s| s.parse().ok()),
-            bitrate_kbps: get(i_bitrate).and_then(|s| s.parse::<f64>().ok()).map(|b| (b / 1000.0) as i32),
+            bitrate_kbps: get(i_bitrate)
+                .and_then(|s| s.parse::<f64>().ok())
+                .map(|b| (b / 1000.0) as i32),
             license_raw: get(i_license).unwrap_or_default(),
         });
     }
@@ -179,7 +208,7 @@ pub async fn harvest(
     nats: Arc<NatsManager>,
 ) -> Result<(u64, u64)> {
     let client = reqwest::Client::builder()
-        .user_agent(concat!("ArachneBot/", env!("CARGO_PKG_VERSION")))
+        .user_agent(user_agent(cfg.contact.as_deref()))
         .build()?;
 
     info!("downloading fma_metadata.zip (358MB)…");
@@ -223,7 +252,10 @@ pub async fn harvest(
 
         // FMA has no per-track web page (the live site's API is dead); the
         // dataset repo + mirror path are the provenance anchors.
-        let page_url = format!("https://github.com/mdeff/fma — fma_metadata/tracks.csv track_id={}", row.track_id);
+        let page_url = format!(
+            "https://github.com/mdeff/fma — fma_metadata/tracks.csv track_id={}",
+            row.track_id
+        );
         let record = arachne_core::models::TrackRecord {
             source: SOURCE_NAME.into(),
             source_id: row.track_id.to_string(),

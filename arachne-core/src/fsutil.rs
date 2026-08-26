@@ -58,7 +58,10 @@ pub fn sanitize_path_segment(input: &str) -> String {
 /// On Windows, antivirus (Defender) briefly holds handles on freshly written
 /// files; the resulting ERROR_SHARING_VIOLATION surfaces as an OS error 32
 /// here. Short retries absorb it.
-pub async fn rename_with_retry(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+pub async fn rename_with_retry(
+    from: &std::path::Path,
+    to: &std::path::Path,
+) -> std::io::Result<()> {
     const DELAYS_MS: [u64; 5] = [10, 25, 50, 100, 250];
     let mut last = match tokio::fs::rename(from, to).await {
         Ok(()) => return Ok(()),

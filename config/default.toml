@@ -28,7 +28,6 @@ retry_backoff_ms = 500
 [coordinator]
 max_pages_per_domain = 50000
 batch_size = 5000
-batch_timeout_ms = 100
 dedup_bloom_capacity = 100000000
 dedup_bloom_fp_rate = 0.001
 
@@ -41,7 +40,6 @@ respect_robots_txt = true
 [storage]
 content_dir = "./crawled_data"
 store_raw_html = true
-store_extracted_text = true
 
 [media]
 store_dir = "./media_store"

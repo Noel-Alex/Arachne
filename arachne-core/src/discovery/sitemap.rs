@@ -47,9 +47,11 @@ pub fn parse_sitemap(xml: &[u8]) -> Result<Sitemap> {
             }
             Ok(Event::Text(t)) => {
                 if current_tag.is_some() {
-                    current_text.push_str(&String::from_utf8_lossy(
-                        t.unescape().unwrap_or_default().as_bytes(),
-                    ));
+                    // quick-xml 0.41: xml_content() handles entity unescaping +
+                    // EOL normalization; sitemaps are XML 1.0 documents.
+                    if let Ok(text) = t.xml_content(quick_xml::XmlVersion::Implicit1_0) {
+                        current_text.push_str(&text);
+                    }
                 }
             }
             Ok(Event::End(e)) => {

@@ -11,6 +11,10 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use object_store::ObjectStore;
+// object_store 0.14 moved the convenience methods (head/put/get) onto the
+// ObjectStoreExt trait; importing it keeps Arc<dyn ObjectStore> call sites
+// working unchanged.
+use object_store::ObjectStoreExt;
 use object_store::local::LocalFileSystem;
 
 /// Destination for a stored media file.

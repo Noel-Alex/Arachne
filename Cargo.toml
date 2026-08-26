@@ -18,7 +18,7 @@ license = "MIT"
 tokio = { version = "1.44", features = ["full"] }
 
 # Messaging (NATS JetStream)
-async-nats = "0.40"
+async-nats = "0.50"
 
 # HTTP
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "gzip", "brotli", "deflate", "stream", "cookies", "hickory-dns"] }
@@ -47,7 +47,7 @@ thiserror = "2.0"
 # Logging & Metrics
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
-prometheus = "0.13"
+prometheus = "0.14"
 
 # Rate limiting
 governor = "0.8"
@@ -80,7 +80,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1.0", features = ["v4", "serde"] }
 
 # Content storage
-object_store = { version = "0.11", features = ["aws"] }
+object_store = { version = "0.14", features = ["aws"] }
 bytes = "1.9"
 
 # Handoff snapshot compression
@@ -109,7 +109,7 @@ lofty = "0.21"
 fs4 = { version = "0.12", features = ["tokio"] }
 
 # Streaming XML (sitemap parsing)
-quick-xml = "0.36"
+quick-xml = "0.41"
 
 # RSS/Atom/JSON feed parsing
 feed-rs = "2.2"
